@@ -12,6 +12,9 @@ const rememberPasswordEl = document.getElementById("rememberPassword");
 const statusEl = document.getElementById("statusText");
 const tabMetaEl = document.getElementById("tabMeta");
 const chartEl = document.getElementById("chartPlaceholder");
+const kpiGridEl = document.getElementById("kpiGrid");
+const topVehiclesChartEl = document.getElementById("topVehiclesChart");
+const clearDrilldownBtn = document.getElementById("clearDrilldownBtn");
 const tableHead = document.getElementById("dataTableHead");
 const tableBody = document.querySelector("#dataTable tbody");
 const tabButtons = Array.from(document.querySelectorAll(".tab-btn"));
@@ -291,6 +294,67 @@ function renderChart(lines) {
   `;
 }
 
+function renderKpis(rows) {
+  if (!rows.length) {
+    kpiGridEl.innerHTML = "";
+    return;
+  }
+  const serials = new Set(rows.map((r) => r.device_serial));
+  const total = rows.reduce((acc, r) => acc + (Number(r.value) || 0), 0);
+  const avgVehicle = serials.size ? total / serials.size : 0;
+  const avgRow = rows.length ? total / rows.length : 0;
+  const selected = state.selectedVehicleKeys.size;
+
+  const cards = [
+    { label: "Vehículos", value: serials.size.toString() },
+    { label: "Valor total", value: total.toFixed(2) },
+    { label: "Media por vehículo", value: avgVehicle.toFixed(2) },
+    { label: "Media por fila", value: avgRow.toFixed(2) },
+    { label: "Seleccionados", value: selected.toString() },
+  ];
+
+  kpiGridEl.innerHTML = cards.map((c) => `
+    <div class="kpi-card">
+      <div class="kpi-label">${c.label}</div>
+      <div class="kpi-value">${c.value}</div>
+    </div>
+  `).join("");
+}
+
+function renderTopVehiclesChart(rows) {
+  if (!rows.length) {
+    topVehiclesChartEl.textContent = "Sin datos";
+    return;
+  }
+  const byVehicle = new Map();
+  for (const r of rows) {
+    const key = `${r.device_name}|||${r.device_serial}`;
+    byVehicle.set(key, (byVehicle.get(key) || 0) + (Number(r.value) || 0));
+  }
+  const data = Array.from(byVehicle.entries())
+    .map(([key, total]) => {
+      const [name, serial] = key.split("|||");
+      return { key, name, serial, total };
+    })
+    .sort((a, b) => b.total - a.total)
+    .slice(0, 12);
+
+  const max = Math.max(...data.map((d) => d.total), 1);
+  topVehiclesChartEl.innerHTML = data.map((d) => {
+    const pct = Math.max(2, (d.total / max) * 100);
+    const selected = state.selectedVehicleKeys.has(d.key);
+    return `
+      <div class="top-row ${selected ? "selected" : ""}" data-key="${d.key}" title="${d.name} | ${d.serial} | ${d.total.toFixed(2)}">
+        <div class="top-label">${d.name} <span>${d.serial}</span></div>
+        <div class="top-bar-wrap">
+          <div class="top-bar" style="width:${pct}%"></div>
+        </div>
+        <div class="top-value">${d.total.toFixed(2)}</div>
+      </div>
+    `;
+  }).join("");
+}
+
 function buildVehicleIndex(rows) {
   const map = new Map();
   for (const r of rows) {
@@ -388,6 +452,8 @@ function refreshVisualsFromRows() {
   }
 
   renderChart(lines);
+  renderKpis(rows);
+  renderTopVehiclesChart(rows);
   renderPivotTable(rows);
 }
 
@@ -513,6 +579,18 @@ tableHead.addEventListener("change", (ev) => {
   } else {
     state.selectedVehicleKeys.clear();
   }
+  refreshVisualsFromRows();
+});
+topVehiclesChartEl.addEventListener("click", (ev) => {
+  const target = ev.target instanceof HTMLElement ? ev.target.closest(".top-row") : null;
+  if (!target) return;
+  const key = target.dataset.key || "";
+  if (!key) return;
+  state.selectedVehicleKeys = new Set([key]);
+  refreshVisualsFromRows();
+});
+clearDrilldownBtn.addEventListener("click", () => {
+  state.selectedVehicleKeys.clear();
   refreshVisualsFromRows();
 });
 
