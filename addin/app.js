@@ -12,6 +12,7 @@ const rememberPasswordEl = document.getElementById("rememberPassword");
 const statusEl = document.getElementById("statusText");
 const tabMetaEl = document.getElementById("tabMeta");
 const chartEl = document.getElementById("chartPlaceholder");
+const zoomBackBtn = document.getElementById("zoomBackBtn");
 const kpiGridEl = document.getElementById("kpiGrid");
 const topVehiclesChartEl = document.getElementById("topVehiclesChart");
 const byGroupChartEl = document.getElementById("byGroupChart");
@@ -37,11 +38,13 @@ const state = {
   selectedVehicleKeys: new Set(),
   activeTab: "main-data",
   tabCache: {},
+  chartGeom: null,
+  dragZoom: null,
   drillFilters: {
     groupName: null,
     fuelType: null,
-    bucket: null,
   },
+  zoomStack: [],
 };
 
 const TAB_METRIC = {
@@ -199,6 +202,7 @@ function formatAxisLabel(bucket) {
 }
 
 function applyDrillFilters(rows) {
+  const zoom = state.zoomStack.length ? state.zoomStack[state.zoomStack.length - 1] : null;
   return rows.filter((r) => {
     if (state.drillFilters.groupName && (r.group_name || "Sin grupo") !== state.drillFilters.groupName) {
       return false;
@@ -206,11 +210,108 @@ function applyDrillFilters(rows) {
     if (state.drillFilters.fuelType && (r.fuel_type || "Unknown") !== state.drillFilters.fuelType) {
       return false;
     }
-    if (state.drillFilters.bucket && r.bucket !== state.drillFilters.bucket) {
+    if (zoom && (r.bucket < zoom.from || r.bucket > zoom.to)) {
       return false;
     }
     return true;
   });
+}
+
+function clamp(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function currentZoomRange() {
+  return state.zoomStack.length ? state.zoomStack[state.zoomStack.length - 1] : null;
+}
+
+function updateZoomControls() {
+  const canBack = state.zoomStack.length > 0;
+  zoomBackBtn.disabled = !canBack;
+  if (canBack) {
+    const z = currentZoomRange();
+    zoomBackBtn.title = `Zoom activo ${z.from} - ${z.to}. Pulsa para volver.`;
+  } else {
+    zoomBackBtn.title = "Sin zoom activo";
+  }
+}
+
+function bucketAtX(svgX) {
+  const geom = state.chartGeom;
+  if (!geom || !geom.buckets.length) return null;
+  const { width, pad, buckets } = geom;
+  const span = width - pad * 2;
+  if (span <= 0) return null;
+  const idx = clamp(Math.round(((svgX - pad) / span) * Math.max(buckets.length - 1, 1)), 0, buckets.length - 1);
+  return buckets[idx];
+}
+
+function svgXFromEvent(evt, svg) {
+  const rect = svg.getBoundingClientRect();
+  if (!rect.width) return 0;
+  const rel = (evt.clientX - rect.left) / rect.width;
+  return rel * state.chartGeom.width;
+}
+
+function updateZoomRect() {
+  const drag = state.dragZoom;
+  if (!drag) return;
+  const rect = drag.svg.querySelector("#chartZoomRect");
+  if (!rect) return;
+  const x1 = clamp(Math.min(drag.startX, drag.currentX), state.chartGeom.pad, state.chartGeom.width - state.chartGeom.pad);
+  const x2 = clamp(Math.max(drag.startX, drag.currentX), state.chartGeom.pad, state.chartGeom.width - state.chartGeom.pad);
+  const w = Math.max(0, x2 - x1);
+  rect.setAttribute("x", x1.toFixed(2));
+  rect.setAttribute("width", w.toFixed(2));
+  rect.setAttribute("display", w >= 2 ? "block" : "none");
+}
+
+function attachChartZoomHandlers() {
+  chartEl.onpointerdown = (evt) => {
+    if (evt.button !== 0 || !state.chartGeom || state.chartGeom.buckets.length < 2) return;
+    const area = evt.target instanceof Element ? evt.target.closest("[data-zoom-area='1']") : null;
+    if (!area) return;
+    const svg = area.closest("svg");
+    if (!(svg instanceof SVGElement)) return;
+    const x = svgXFromEvent(evt, svg);
+    state.dragZoom = { svg, pointerId: evt.pointerId, startX: x, currentX: x };
+    svg.setPointerCapture(evt.pointerId);
+    updateZoomRect();
+  };
+
+  chartEl.onpointermove = (evt) => {
+    if (!state.dragZoom || evt.pointerId !== state.dragZoom.pointerId) return;
+    const x = svgXFromEvent(evt, state.dragZoom.svg);
+    state.dragZoom.currentX = x;
+    updateZoomRect();
+  };
+
+  chartEl.onpointerup = (evt) => {
+    if (!state.dragZoom || evt.pointerId !== state.dragZoom.pointerId) return;
+    const drag = state.dragZoom;
+    drag.svg.releasePointerCapture(evt.pointerId);
+    const moved = Math.abs(drag.currentX - drag.startX);
+    state.dragZoom = null;
+
+    if (moved < 4) {
+      refreshVisualsFromRows();
+      return;
+    }
+
+    const b1 = bucketAtX(drag.startX);
+    const b2 = bucketAtX(drag.currentX);
+    if (!b1 || !b2) {
+      refreshVisualsFromRows();
+      return;
+    }
+    const from = b1 <= b2 ? b1 : b2;
+    const to = b1 <= b2 ? b2 : b1;
+    const current = currentZoomRange();
+    if (!current || current.from !== from || current.to !== to) {
+      state.zoomStack.push({ from, to });
+    }
+    refreshVisualsFromRows();
+  };
 }
 
 function buildSeries(rows, mode, selectedKeys) {
@@ -265,6 +366,7 @@ function renderChart(lines) {
 
   const buckets = lines[0].points.map((p) => p.bucket);
   const idxMap = new Map(buckets.map((b, i) => [b, i]));
+  state.chartGeom = { width, height, pad, buckets };
 
   const toX = (bucket) => {
     const i = idxMap.get(bucket) ?? 0;
@@ -295,11 +397,8 @@ function renderChart(lines) {
     const circles = line.points.map((p) => {
       const x = toX(p.bucket).toFixed(2);
       const y = toY(Number(p.value)).toFixed(2);
-      const selectedBucket = state.drillFilters.bucket === p.bucket;
-      const encodedBucket = encodeURIComponent(p.bucket);
       return `
-        <circle cx="${x}" cy="${y}" r="${selectedBucket ? "5.2" : "3.2"}" fill="${line.color}" data-bucket="${encodedBucket}" style="cursor:pointer"
-          stroke="${selectedBucket ? "#0f172a" : "none"}" stroke-width="${selectedBucket ? "1.5" : "0"}">
+        <circle cx="${x}" cy="${y}" r="3.2" fill="${line.color}">
           <title>${line.name}\n${p.bucket}: ${Number(p.value).toFixed(2)}</title>
         </circle>
       `;
@@ -320,13 +419,17 @@ function renderChart(lines) {
 
   chartEl.innerHTML = `
     <svg viewBox="0 0 ${width} ${height}" width="100%" height="100%" role="img" aria-label="Evolución temporal">
+      <rect x="${pad}" y="${pad}" width="${width - pad * 2}" height="${height - pad * 2}" fill="transparent" data-zoom-area="1"></rect>
       <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" stroke="#94a3b8" stroke-width="1" />
       <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${height - pad}" stroke="#94a3b8" stroke-width="1" />
       ${tickMarks}
       ${linePaths}
       ${legend}
+      <rect id="chartZoomRect" x="0" y="${pad}" width="0" height="${height - pad * 2}" fill="#2563eb22" stroke="#2563eb" stroke-width="1" display="none"></rect>
     </svg>
   `;
+  updateZoomControls();
+  attachChartZoomHandlers();
 }
 
 function renderKpis(rows) {
@@ -594,7 +697,8 @@ function refreshVisualsFromRows() {
   const filters = [];
   if (state.drillFilters.groupName) filters.push(`Grupo: ${state.drillFilters.groupName}`);
   if (state.drillFilters.fuelType) filters.push(`Fuel: ${state.drillFilters.fuelType}`);
-  if (state.drillFilters.bucket) filters.push(`Periodo: ${state.drillFilters.bucket}`);
+  const zoom = currentZoomRange();
+  if (zoom) filters.push(`Zoom: ${zoom.from} - ${zoom.to}`);
   drilldownActiveEl.textContent = filters.length ? filters.join(" | ") : "Sin filtros de drilldown";
 }
 
@@ -692,7 +796,7 @@ for (const btn of tabButtons) {
     state.selectedVehicleKeys.clear();
     state.drillFilters.groupName = null;
     state.drillFilters.fuelType = null;
-    state.drillFilters.bucket = null;
+    state.zoomStack = [];
     updateTabUI();
     if (!state.connected) return;
     try {
@@ -737,14 +841,12 @@ clearDrilldownBtn.addEventListener("click", () => {
   state.selectedVehicleKeys.clear();
   state.drillFilters.groupName = null;
   state.drillFilters.fuelType = null;
-  state.drillFilters.bucket = null;
+  state.zoomStack = [];
   refreshVisualsFromRows();
 });
-chartEl.addEventListener("click", (ev) => {
-  const target = ev.target instanceof Element ? ev.target.closest("circle[data-bucket]") : null;
-  if (!target) return;
-  const bucket = target.getAttribute("data-bucket") ? decodeURIComponent(target.getAttribute("data-bucket")) : null;
-  state.drillFilters.bucket = state.drillFilters.bucket === bucket ? null : bucket;
+zoomBackBtn.addEventListener("click", () => {
+  if (!state.zoomStack.length) return;
+  state.zoomStack.pop();
   refreshVisualsFromRows();
 });
 byGroupChartEl.addEventListener("click", (ev) => {

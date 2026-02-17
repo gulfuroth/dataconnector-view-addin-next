@@ -100,6 +100,16 @@ section {
   grid-template-columns: repeat(5, minmax(120px, 1fr));
   gap: 10px;
 }
+.dashboard-grid {
+  margin-top: 14px;
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 14px;
+}
+.chart-main { grid-column: 1; }
+.chart-top { grid-column: 2; }
+.chart-group { grid-column: 1; }
+.chart-fuel { grid-column: 2; }
 .kpi-card {
   border: 1px solid var(--line);
   border-radius: 8px;
@@ -121,6 +131,23 @@ section {
   justify-content: space-between;
   align-items: center;
   margin-bottom: 8px;
+  gap: 12px;
+}
+.zoom-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.zoom-hint {
+  font-size: 11px;
+  color: var(--muted);
+}
+.icon-btn {
+  min-width: 32px;
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 18px;
+  line-height: 1;
 }
 .drilldown-active {
   margin-bottom: 8px;
@@ -237,7 +264,7 @@ button.secondary {
   background: #fff;
 }
 #chartPlaceholder {
-  height: 260px;
+  height: 320px;
   display: grid;
   place-items: center;
   color: var(--muted);
@@ -252,6 +279,11 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); f
   .config-grid { grid-template-columns: repeat(2, minmax(160px, 1fr)); }
   .filters { grid-template-columns: repeat(4, minmax(120px, 1fr)); }
   .kpi-grid { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
+  .dashboard-grid { grid-template-columns: 1fr; }
+  .chart-main,
+  .chart-top,
+  .chart-group,
+  .chart-fuel { grid-column: 1; }
   .top-row { grid-template-columns: 1fr; }
   .top-value { text-align: left; }
   .fuel-wrap { flex-direction: column; align-items: flex-start; }
