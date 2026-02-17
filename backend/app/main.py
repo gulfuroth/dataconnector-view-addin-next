@@ -164,6 +164,70 @@ def _myg_device_name_map(credentials: Dict, server: str, serials: List[str]) -> 
     return out
 
 
+def _myg_group_name_map(credentials: Dict, server: str) -> Dict[str, str]:
+    result = _myg_rpc(
+        server,
+        "Get",
+        {
+            "typeName": "Group",
+            "credentials": credentials,
+        },
+    )
+    out: Dict[str, str] = {}
+    for g in result or []:
+        gid = g.get("id")
+        name = g.get("name")
+        if gid and name:
+            out[str(gid)] = str(name).strip()
+    return out
+
+
+def _first_group_name_for_device(device: Dict, group_name_by_id: Dict[str, str]) -> str:
+    groups = device.get("groups") or []
+    # Prefer the first known non-company group to keep one stable grouping per vehicle.
+    fallback: Optional[str] = None
+    for g in groups:
+        gid = str((g or {}).get("id") or (g or {}).get("Id") or "").strip()
+        if not gid:
+            continue
+        name = (group_name_by_id.get(gid) or "").strip()
+        if not name:
+            continue
+        if fallback is None:
+            fallback = name
+        if "company group" not in name.lower():
+            return name
+    return fallback or "Sin grupo"
+
+
+def _myg_device_dimensions(credentials: Dict, server: str, serials: List[str]) -> Dict[str, Dict[str, str]]:
+    wanted = set(_normalize_serials(serials))
+    if not wanted:
+        return {}
+
+    group_name_by_id = _myg_group_name_map(credentials, server)
+    result = _myg_rpc(
+        server,
+        "Get",
+        {
+            "typeName": "Device",
+            "credentials": credentials,
+        },
+    )
+    out: Dict[str, Dict[str, str]] = {}
+    for d in result or []:
+        serial = (d.get("serialNumber") or "").strip()
+        if not serial or serial not in wanted:
+            continue
+        group_name = _first_group_name_for_device(d, group_name_by_id)
+        out[serial] = {
+            "group_name": group_name or "Sin grupo",
+            # MyGeotab Device doesn't expose a stable fuel type for all tenants.
+            "fuel_type": "Unknown",
+        }
+    return out
+
+
 def _dc_device_serials_by_group(base_url: str, auth_header: str, group_id: str) -> List[str]:
     group_escaped = (group_id or "").replace("'", "''")
     table_candidates = ["DeviceGroups", "CurrentDeviceGroups"]
@@ -199,6 +263,56 @@ def _dc_auth_header(database: str, user: str, password: str) -> str:
 
     raw = f"{database}/{user}:{password}".encode("utf-8")
     return "Basic " + base64.b64encode(raw).decode("ascii")
+
+
+def _dc_fuel_type_map(
+    base_url: str,
+    auth_header: str,
+    table: str,
+    date_col: str,
+    search_expr: str,
+    allowed_serials: Optional[List[str]] = None,
+) -> Dict[str, str]:
+    candidates = ["FuelType", "EngineType"]
+    fuel_rows: List[Dict] = []
+    selected_col: Optional[str] = None
+    for col in candidates:
+        try:
+            fuel_rows = _dc_query_with_fallback(
+                base_url,
+                auth_header,
+                table,
+                [date_col, "SerialNo", col],
+                None,
+                search_expr,
+            )
+            selected_col = col
+            break
+        except HTTPException as exc:
+            detail = str(exc.detail)
+            if exc.status_code == 502 and "Invalid Parameter" in detail:
+                continue
+            break
+    if not selected_col:
+        return {}
+
+    allowed_set = set(_normalize_serials(allowed_serials or [])) if allowed_serials else None
+    by_serial_counts: Dict[str, Dict[str, int]] = defaultdict(dict)
+    for r in fuel_rows:
+        serial = (r.get("SerialNo") or "").strip()
+        if not serial:
+            continue
+        if allowed_set is not None and serial not in allowed_set:
+            continue
+        fuel = str(r.get(selected_col) or "").strip() or "Unknown"
+        by_serial_counts.setdefault(serial, {})
+        by_serial_counts[serial][fuel] = by_serial_counts[serial].get(fuel, 0) + 1
+
+    out: Dict[str, str] = {}
+    for serial, counts in by_serial_counts.items():
+        best = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0].lower()))[0][0]
+        out[serial] = best
+    return out
 
 
 def _dc_query(
@@ -440,6 +554,15 @@ def _run_query(inp: QueryInput) -> Dict:
 
     serial_set = _normalize_serials([(r.get("SerialNo") or "").strip() for r in metric_rows if r.get("SerialNo")])
     device_names = _myg_device_name_map(credentials, inp.mygServer, serial_set)
+    device_dims = _myg_device_dimensions(credentials, inp.mygServer, serial_set)
+    fuel_type_by_serial = _dc_fuel_type_map(
+        inp.dcBaseUrl,
+        auth_header,
+        table,
+        date_col,
+        search_expr,
+        serial_set,
+    )
 
     rows: List[Dict] = []
     for r in metric_rows:
@@ -457,6 +580,11 @@ def _run_query(inp: QueryInput) -> Dict:
                 "bucket": bucket,
                 "device_name": device_names.get(serial, serial),
                 "device_serial": serial,
+                "group_name": (device_dims.get(serial) or {}).get("group_name", "Sin grupo"),
+                "fuel_type": fuel_type_by_serial.get(
+                    serial,
+                    (device_dims.get(serial) or {}).get("fuel_type", "Unknown"),
+                ),
                 "value": float(value),
             }
         )

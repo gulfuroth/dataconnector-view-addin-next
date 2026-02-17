@@ -122,7 +122,17 @@ section {
   align-items: center;
   margin-bottom: 8px;
 }
+.drilldown-active {
+  margin-bottom: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
 #topVehiclesChart {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+#byGroupChart {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -162,11 +172,51 @@ section {
   height: 100%;
   background: #0f766e;
 }
+.top-bar.group {
+  background: #1d4ed8;
+}
 .top-value {
   text-align: right;
   font-size: 12px;
   font-weight: 700;
   color: #334155;
+}
+#byFuelTypeChart {
+  display: block;
+}
+.fuel-wrap {
+  display: flex;
+  gap: 16px;
+  align-items: center;
+}
+.fuel-legend {
+  min-width: 260px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.fuel-legend-row {
+  display: grid;
+  grid-template-columns: 12px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 6px 8px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.fuel-legend-row.selected {
+  border-color: #2563eb;
+  background: #eff6ff;
+}
+.fuel-legend-row .dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+}
+.fuel-segment {
+  cursor: pointer;
 }
 label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 select, input, button {
@@ -204,6 +254,8 @@ th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); f
   .kpi-grid { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
   .top-row { grid-template-columns: 1fr; }
   .top-value { text-align: left; }
+  .fuel-wrap { flex-direction: column; align-items: flex-start; }
+  .fuel-legend { min-width: 0; width: 100%; }
 }
 @media (max-width: 700px) {
   .config-grid,

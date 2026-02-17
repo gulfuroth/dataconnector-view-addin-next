@@ -14,6 +14,9 @@ const tabMetaEl = document.getElementById("tabMeta");
 const chartEl = document.getElementById("chartPlaceholder");
 const kpiGridEl = document.getElementById("kpiGrid");
 const topVehiclesChartEl = document.getElementById("topVehiclesChart");
+const byGroupChartEl = document.getElementById("byGroupChart");
+const byFuelTypeChartEl = document.getElementById("byFuelTypeChart");
+const drilldownActiveEl = document.getElementById("drilldownActive");
 const clearDrilldownBtn = document.getElementById("clearDrilldownBtn");
 const tableHead = document.getElementById("dataTableHead");
 const tableBody = document.querySelector("#dataTable tbody");
@@ -34,6 +37,10 @@ const state = {
   selectedVehicleKeys: new Set(),
   activeTab: "main-data",
   tabCache: {},
+  drillFilters: {
+    groupName: null,
+    fuelType: null,
+  },
 };
 
 const TAB_METRIC = {
@@ -138,6 +145,15 @@ function csvEscape(value) {
   return str;
 }
 
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
 function exportPivotToCsv() {
   if (!state.lastPivot || !state.lastPivot.vehicles.length) {
     throw new Error("No hay tabla para exportar");
@@ -179,6 +195,18 @@ function formatAxisLabel(bucket) {
     return `${d}/${m}`;
   }
   return bucket;
+}
+
+function applyDrillFilters(rows) {
+  return rows.filter((r) => {
+    if (state.drillFilters.groupName && (r.group_name || "Sin grupo") !== state.drillFilters.groupName) {
+      return false;
+    }
+    if (state.drillFilters.fuelType && (r.fuel_type || "Unknown") !== state.drillFilters.fuelType) {
+      return false;
+    }
+    return true;
+  });
 }
 
 function buildSeries(rows, mode, selectedKeys) {
@@ -355,6 +383,104 @@ function renderTopVehiclesChart(rows) {
   }).join("");
 }
 
+function renderGroupChart(rows) {
+  if (!rows.length) {
+    byGroupChartEl.textContent = "Sin datos";
+    return;
+  }
+  const byGroup = new Map();
+  for (const r of rows) {
+    const group = r.group_name || "Sin grupo";
+    if (!byGroup.has(group)) byGroup.set(group, new Set());
+    byGroup.get(group).add(r.device_serial);
+  }
+  const data = Array.from(byGroup.entries())
+    .map(([group, serials]) => ({ group, count: serials.size }))
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 12);
+  const max = Math.max(...data.map((d) => d.count), 1);
+  byGroupChartEl.innerHTML = data.map((d) => {
+    const pct = Math.max(4, (d.count / max) * 100);
+    const selected = state.drillFilters.groupName === d.group;
+    const encodedGroup = encodeURIComponent(d.group);
+    return `
+      <div class="top-row ${selected ? "selected" : ""}" data-group="${encodedGroup}" title="${escapeHtml(d.group)} | ${d.count} vehículos">
+        <div class="top-label">${escapeHtml(d.group)}</div>
+        <div class="top-bar-wrap">
+          <div class="top-bar group" style="width:${pct}%"></div>
+        </div>
+        <div class="top-value">${d.count}</div>
+      </div>
+    `;
+  }).join("");
+}
+
+function renderFuelTypeChart(rows) {
+  if (!rows.length) {
+    byFuelTypeChartEl.textContent = "Sin datos";
+    return;
+  }
+  const byFuel = new Map();
+  for (const r of rows) {
+    const fuel = r.fuel_type || "Unknown";
+    if (!byFuel.has(fuel)) byFuel.set(fuel, new Set());
+    byFuel.get(fuel).add(r.device_serial);
+  }
+  const data = Array.from(byFuel.entries())
+    .map(([fuel, serials]) => ({ fuel, count: serials.size }))
+    .sort((a, b) => b.count - a.count);
+  const total = data.reduce((acc, d) => acc + d.count, 0) || 1;
+  const colors = ["#0f766e", "#2563eb", "#ea580c", "#7c3aed", "#9333ea", "#475569"];
+
+  let acc = 0;
+  const segments = data.map((d, idx) => {
+    const start = acc / total;
+    acc += d.count;
+    const end = acc / total;
+    return { ...d, color: colors[idx % colors.length], start, end };
+  });
+
+  const cx = 74;
+  const cy = 74;
+  const r = 56;
+  const stroke = 24;
+  const c = 2 * Math.PI * r;
+
+  const arcs = segments.map((s) => {
+    const dash = Math.max(1, (s.end - s.start) * c);
+    const offset = (1 - s.start) * c;
+    const selected = state.drillFilters.fuelType === s.fuel;
+    const encodedFuel = encodeURIComponent(s.fuel);
+    return `
+      <circle cx="${cx}" cy="${cy}" r="${r}" fill="none" stroke="${s.color}" stroke-width="${selected ? stroke + 4 : stroke}"
+        stroke-dasharray="${dash} ${c - dash}" stroke-dashoffset="${offset}" data-fuel="${encodedFuel}" class="fuel-segment"></circle>
+    `;
+  }).join("");
+
+  const legend = segments.map((s) => {
+    const selected = state.drillFilters.fuelType === s.fuel;
+    const encodedFuel = encodeURIComponent(s.fuel);
+    return `
+      <div class="fuel-legend-row ${selected ? "selected" : ""}" data-fuel="${encodedFuel}">
+        <span class="dot" style="background:${s.color}"></span>
+        <span>${escapeHtml(s.fuel)}</span>
+        <span>${s.count}</span>
+      </div>
+    `;
+  }).join("");
+
+  byFuelTypeChartEl.innerHTML = `
+    <div class="fuel-wrap">
+      <svg viewBox="0 0 148 148" width="148" height="148" role="img" aria-label="Vehículos por tipo de fuel">
+        ${arcs}
+        <text x="${cx}" y="${cy - 3}" text-anchor="middle" font-size="18" font-weight="700" fill="#0f172a">${total}</text>
+        <text x="${cx}" y="${cy + 14}" text-anchor="middle" font-size="10" fill="#64748b">vehículos</text>
+      </svg>
+      <div class="fuel-legend">${legend}</div>
+    </div>
+  `;
+}
+
 function buildVehicleIndex(rows) {
   const map = new Map();
   for (const r of rows) {
@@ -431,7 +557,8 @@ function renderPivotTable(rows) {
 }
 
 function refreshVisualsFromRows() {
-  const rows = state.lastRows || [];
+  const allRows = state.lastRows || [];
+  const rows = applyDrillFilters(allRows);
   const selected = state.selectedVehicleKeys;
   const mode = chartAggModeEl.value;
 
@@ -454,7 +581,13 @@ function refreshVisualsFromRows() {
   renderChart(lines);
   renderKpis(rows);
   renderTopVehiclesChart(rows);
+  renderGroupChart(allRows);
+  renderFuelTypeChart(allRows);
   renderPivotTable(rows);
+  const filters = [];
+  if (state.drillFilters.groupName) filters.push(`Grupo: ${state.drillFilters.groupName}`);
+  if (state.drillFilters.fuelType) filters.push(`Fuel: ${state.drillFilters.fuelType}`);
+  drilldownActiveEl.textContent = filters.length ? filters.join(" | ") : "Sin filtros de drilldown";
 }
 
 async function apiPost(path, payload) {
@@ -549,6 +682,8 @@ for (const btn of tabButtons) {
     if (!tab || tab === state.activeTab) return;
     state.activeTab = tab;
     state.selectedVehicleKeys.clear();
+    state.drillFilters.groupName = null;
+    state.drillFilters.fuelType = null;
     updateTabUI();
     if (!state.connected) return;
     try {
@@ -591,6 +726,22 @@ topVehiclesChartEl.addEventListener("click", (ev) => {
 });
 clearDrilldownBtn.addEventListener("click", () => {
   state.selectedVehicleKeys.clear();
+  state.drillFilters.groupName = null;
+  state.drillFilters.fuelType = null;
+  refreshVisualsFromRows();
+});
+byGroupChartEl.addEventListener("click", (ev) => {
+  const target = ev.target instanceof HTMLElement ? ev.target.closest("[data-group]") : null;
+  if (!target) return;
+  const group = target.dataset.group ? decodeURIComponent(target.dataset.group) : null;
+  state.drillFilters.groupName = state.drillFilters.groupName === group ? null : group;
+  refreshVisualsFromRows();
+});
+byFuelTypeChartEl.addEventListener("click", (ev) => {
+  const target = ev.target instanceof HTMLElement ? ev.target.closest("[data-fuel]") : null;
+  if (!target) return;
+  const fuel = target.dataset.fuel ? decodeURIComponent(target.dataset.fuel) : null;
+  state.drillFilters.fuelType = state.drillFilters.fuelType === fuel ? null : fuel;
   refreshVisualsFromRows();
 });
 
