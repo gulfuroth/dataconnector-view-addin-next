@@ -21,6 +21,8 @@ const topVehiclesChartEl = document.getElementById("topVehiclesChart");
 const byGroupChartEl = document.getElementById("byGroupChart");
 const byFuelTypeChartEl = document.getElementById("byFuelTypeChart");
 const drilldownActiveEl = document.getElementById("drilldownActive");
+const tabInsightsTitleEl = document.getElementById("tabInsightsTitle");
+const tabInsightsGridEl = document.getElementById("tabInsightsGrid");
 const clearDrilldownBtn = document.getElementById("clearDrilldownBtn");
 const tableHead = document.getElementById("dataTableHead");
 const tableBody = document.querySelector("#dataTable tbody");
@@ -159,6 +161,40 @@ function escapeHtml(value) {
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#39;");
+}
+
+function aggregateBy(rows, keyFn, valueFn = (r) => Number(r.value) || 0) {
+  const out = new Map();
+  for (const r of rows) {
+    const k = keyFn(r);
+    out.set(k, (out.get(k) || 0) + valueFn(r));
+  }
+  return out;
+}
+
+function topNFromMap(m, n = 10) {
+  return Array.from(m.entries())
+    .map(([label, value]) => ({ label, value }))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, n);
+}
+
+function renderMiniBars(items, formatter = (v) => Number(v).toFixed(2)) {
+  if (!items.length) {
+    return '<div class="insight-sub">Sin datos</div>';
+  }
+  const max = Math.max(...items.map((x) => x.value), 1);
+  return `
+    <div class="mini-bars">
+      ${items.map((x) => `
+        <div class="mini-row" title="${escapeHtml(x.label)}">
+          <div class="mini-label">${escapeHtml(x.label)}</div>
+          <div class="mini-track"><div class="mini-fill" style="width:${Math.max(2, (x.value / max) * 100)}%"></div></div>
+          <div class="mini-val">${formatter(x.value)}</div>
+        </div>
+      `).join("")}
+    </div>
+  `;
 }
 
 function exportPivotToCsv() {
@@ -639,6 +675,150 @@ function renderFuelTypeChart(rows) {
   `;
 }
 
+function renderMainDataInsights(rows) {
+  const distinctVehiclesBy = (dimensionFn) => {
+    const dimToVehicles = new Map();
+    for (const r of rows) {
+      const dim = dimensionFn(r);
+      if (!dimToVehicles.has(dim)) dimToVehicles.set(dim, new Set());
+      dimToVehicles.get(dim).add(r.device_serial);
+    }
+    const out = new Map();
+    for (const [dim, serials] of dimToVehicles.entries()) out.set(dim, serials.size);
+    return out;
+  };
+  const byGroup = topNFromMap(distinctVehiclesBy((r) => r.group_name || "Sin grupo"), 8);
+  const byFuel = topNFromMap(distinctVehiclesBy((r) => r.fuel_type || "Unknown"), 8);
+  const byVehicle = topNFromMap(aggregateBy(rows, (r) => `${r.device_name} (${r.device_serial})`), 8);
+
+  tabInsightsGridEl.innerHTML = `
+    <article class="insight-card">
+      <h3 class="insight-title">Vehículos por grupo</h3>
+      ${renderMiniBars(byGroup, (v) => `${Math.round(v)}`)}
+    </article>
+    <article class="insight-card">
+      <h3 class="insight-title">Vehículos por fuel type</h3>
+      ${renderMiniBars(byFuel, (v) => `${Math.round(v)}`)}
+    </article>
+    <article class="insight-card">
+      <h3 class="insight-title">Top distancia por vehículo</h3>
+      ${renderMiniBars(byVehicle, (v) => Number(v).toFixed(1))}
+    </article>
+  `;
+}
+
+function renderUtilizationInsights(rows) {
+  const vehicleTotals = aggregateBy(rows, (r) => r.device_serial);
+  const totalVehicles = vehicleTotals.size;
+  const activeVehicles = Array.from(vehicleTotals.values()).filter((v) => v > 0).length;
+  const activePct = totalVehicles ? (activeVehicles / totalVehicles) * 100 : 0;
+
+  const byBucketVehicle = new Map();
+  for (const r of rows) {
+    if (!byBucketVehicle.has(r.bucket)) byBucketVehicle.set(r.bucket, new Set());
+    if ((Number(r.value) || 0) > 0) byBucketVehicle.get(r.bucket).add(r.device_serial);
+  }
+  const byBucketPct = Array.from(byBucketVehicle.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([bucket, serials]) => ({
+      label: bucket,
+      value: totalVehicles ? (serials.size / totalVehicles) * 100 : 0,
+    }));
+
+  const byGroup = topNFromMap(aggregateBy(rows, (r) => r.group_name || "Sin grupo"), 8);
+
+  tabInsightsGridEl.innerHTML = `
+    <article class="insight-card">
+      <h3 class="insight-title">Vehículos en uso</h3>
+      <div class="insight-metric">${activePct.toFixed(1)}%</div>
+      <div class="insight-sub">${activeVehicles}/${totalVehicles} vehículos con actividad en el periodo</div>
+    </article>
+    <article class="insight-card">
+      <h3 class="insight-title">% vehículos en uso por periodo</h3>
+      ${renderMiniBars(byBucketPct.slice(-10), (v) => `${v.toFixed(1)}%`)}
+    </article>
+    <article class="insight-card">
+      <h3 class="insight-title">Uso agregado por grupo</h3>
+      ${renderMiniBars(byGroup, (v) => Number(v).toFixed(1))}
+    </article>
+  `;
+}
+
+function renderFuelInsights(rows) {
+  const bucketAcc = new Map();
+  const vehicleAcc = new Map();
+  const groupFuel = aggregateBy(rows, (r) => r.group_name || "Sin grupo");
+
+  for (const r of rows) {
+    const fuel = Number(r.value) || 0;
+    const dist = Number(r.distance_value) || 0;
+    const b = r.bucket;
+    const vehicleKey = `${r.device_name} (${r.device_serial})`;
+
+    if (!bucketAcc.has(b)) bucketAcc.set(b, { fuel: 0, dist: 0 });
+    const ba = bucketAcc.get(b);
+    ba.fuel += fuel;
+    ba.dist += dist;
+
+    if (!vehicleAcc.has(vehicleKey)) vehicleAcc.set(vehicleKey, { fuel: 0, dist: 0 });
+    const va = vehicleAcc.get(vehicleKey);
+    va.fuel += fuel;
+    va.dist += dist;
+  }
+
+  const consumptionByBucket = Array.from(bucketAcc.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([bucket, acc]) => ({ label: bucket, value: acc.dist > 0 ? (acc.fuel / acc.dist) * 100 : 0 }));
+
+  const topConsumptionVehicles = Array.from(vehicleAcc.entries())
+    .map(([label, acc]) => ({ label, value: acc.dist > 0 ? (acc.fuel / acc.dist) * 100 : 0, dist: acc.dist }))
+    .filter((x) => x.dist > 20)
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 10)
+    .map(({ label, value }) => ({ label, value }));
+
+  const totalFuel = rows.reduce((acc, r) => acc + (Number(r.value) || 0), 0);
+  const totalDist = rows.reduce((acc, r) => acc + (Number(r.distance_value) || 0), 0);
+  const globalRatio = totalDist > 0 ? (totalFuel / totalDist) * 100 : 0;
+
+  tabInsightsGridEl.innerHTML = `
+    <article class="insight-card">
+      <h3 class="insight-title">Consumo medio</h3>
+      <div class="insight-metric">${globalRatio.toFixed(2)}</div>
+      <div class="insight-sub">litros/100km en el periodo filtrado</div>
+    </article>
+    <article class="insight-card">
+      <h3 class="insight-title">Evolución de consumo (L/100km)</h3>
+      ${renderMiniBars(consumptionByBucket.slice(-10), (v) => v.toFixed(2))}
+    </article>
+    <article class="insight-card">
+      <h3 class="insight-title">Top consumo por vehículo (L/100km)</h3>
+      ${renderMiniBars(topConsumptionVehicles, (v) => v.toFixed(2))}
+    </article>
+    <article class="insight-card">
+      <h3 class="insight-title">Combustible total por grupo</h3>
+      ${renderMiniBars(topNFromMap(groupFuel, 10), (v) => Number(v).toFixed(1))}
+    </article>
+  `;
+}
+
+function renderTabInsights(rows) {
+  tabInsightsTitleEl.textContent = `Detalle de vista: ${tabTitle(state.activeTab)}`;
+  if (!rows.length) {
+    tabInsightsGridEl.innerHTML = '<article class="insight-card"><div class="insight-sub">Sin datos</div></article>';
+    return;
+  }
+  if (state.activeTab === "fuel") {
+    renderFuelInsights(rows);
+    return;
+  }
+  if (state.activeTab === "utilization") {
+    renderUtilizationInsights(rows);
+    return;
+  }
+  renderMainDataInsights(rows);
+}
+
 function buildVehicleIndex(rows) {
   const map = new Map();
   for (const r of rows) {
@@ -744,6 +924,7 @@ function refreshVisualsFromRows() {
   renderFuelTypeChart(allRows);
   renderZoomStrip(dimRows);
   renderPivotTable(rows);
+  renderTabInsights(rows);
   const filters = [];
   if (state.drillFilters.groupName) filters.push(`Grupo: ${state.drillFilters.groupName}`);
   if (state.drillFilters.fuelType) filters.push(`Fuel: ${state.drillFilters.fuelType}`);

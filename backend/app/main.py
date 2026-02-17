@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, urlunparse
 from pathlib import Path
 from typing import Dict, List, Optional
+from copy import deepcopy
 
 import requests
 from fastapi import FastAPI, HTTPException
@@ -656,6 +657,18 @@ def query_tab(tab_name: str, inp: QueryInput):
         return cached_resp
 
     query_data = _run_query(inp)
+    # Fuel view needs distance context to compute consumption (L/100km) in the UI.
+    if tab_name == "fuel":
+        distance_inp = QueryInput(**deepcopy(inp.model_dump(by_alias=True)))
+        distance_inp.metric = "distance"
+        distance_data = _run_query(distance_inp)
+        distance_map: Dict[str, float] = {}
+        for r in distance_data.get("rows", []):
+            key = f"{r.get('bucket')}|||{r.get('device_serial')}"
+            distance_map[key] = float(r.get("value") or 0.0)
+        for r in query_data.get("rows", []):
+            key = f"{r.get('bucket')}|||{r.get('device_serial')}"
+            r["distance_value"] = distance_map.get(key, 0.0)
     response = _build_tab_payload(tab_name, inp.metric, query_data, cache_hit=False)
     _cache_set(payload_key, response)
     return response
