@@ -40,6 +40,7 @@ const state = {
   drillFilters: {
     groupName: null,
     fuelType: null,
+    bucket: null,
   },
 };
 
@@ -205,6 +206,9 @@ function applyDrillFilters(rows) {
     if (state.drillFilters.fuelType && (r.fuel_type || "Unknown") !== state.drillFilters.fuelType) {
       return false;
     }
+    if (state.drillFilters.bucket && r.bucket !== state.drillFilters.bucket) {
+      return false;
+    }
     return true;
   });
 }
@@ -291,8 +295,11 @@ function renderChart(lines) {
     const circles = line.points.map((p) => {
       const x = toX(p.bucket).toFixed(2);
       const y = toY(Number(p.value)).toFixed(2);
+      const selectedBucket = state.drillFilters.bucket === p.bucket;
+      const encodedBucket = encodeURIComponent(p.bucket);
       return `
-        <circle cx="${x}" cy="${y}" r="3.2" fill="${line.color}">
+        <circle cx="${x}" cy="${y}" r="${selectedBucket ? "5.2" : "3.2"}" fill="${line.color}" data-bucket="${encodedBucket}" style="cursor:pointer"
+          stroke="${selectedBucket ? "#0f172a" : "none"}" stroke-width="${selectedBucket ? "1.5" : "0"}">
           <title>${line.name}\n${p.bucket}: ${Number(p.value).toFixed(2)}</title>
         </circle>
       `;
@@ -587,6 +594,7 @@ function refreshVisualsFromRows() {
   const filters = [];
   if (state.drillFilters.groupName) filters.push(`Grupo: ${state.drillFilters.groupName}`);
   if (state.drillFilters.fuelType) filters.push(`Fuel: ${state.drillFilters.fuelType}`);
+  if (state.drillFilters.bucket) filters.push(`Periodo: ${state.drillFilters.bucket}`);
   drilldownActiveEl.textContent = filters.length ? filters.join(" | ") : "Sin filtros de drilldown";
 }
 
@@ -684,6 +692,7 @@ for (const btn of tabButtons) {
     state.selectedVehicleKeys.clear();
     state.drillFilters.groupName = null;
     state.drillFilters.fuelType = null;
+    state.drillFilters.bucket = null;
     updateTabUI();
     if (!state.connected) return;
     try {
@@ -728,6 +737,14 @@ clearDrilldownBtn.addEventListener("click", () => {
   state.selectedVehicleKeys.clear();
   state.drillFilters.groupName = null;
   state.drillFilters.fuelType = null;
+  state.drillFilters.bucket = null;
+  refreshVisualsFromRows();
+});
+chartEl.addEventListener("click", (ev) => {
+  const target = ev.target instanceof Element ? ev.target.closest("circle[data-bucket]") : null;
+  if (!target) return;
+  const bucket = target.getAttribute("data-bucket") ? decodeURIComponent(target.getAttribute("data-bucket")) : null;
+  state.drillFilters.bucket = state.drillFilters.bucket === bucket ? null : bucket;
   refreshVisualsFromRows();
 });
 byGroupChartEl.addEventListener("click", (ev) => {
