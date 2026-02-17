@@ -120,9 +120,14 @@
           <div class="zoom-actions">
             <span class="zoom-hint">Arrastra en la gráfica para zoom</span>
             <button id="zoomBackBtn" class="secondary icon-btn" type="button" title="Sin zoom activo" disabled>&lt;</button>
+            <button id="zoomResetBtn" class="secondary" type="button" title="Sin zoom activo" disabled>Reset zoom</button>
           </div>
         </div>
         <div id="chartPlaceholder">Sin datos</div>
+        <div id="zoomRangeStrip" class="zoom-range-strip">
+          <div id="zoomRangeFill" class="zoom-range-fill"></div>
+          <div id="zoomRangeLabel" class="zoom-range-label">Sin zoom</div>
+        </div>
       </section>
 
       <section class="chart-box chart-top">

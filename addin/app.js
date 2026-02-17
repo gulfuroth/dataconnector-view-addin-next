@@ -13,6 +13,9 @@ const statusEl = document.getElementById("statusText");
 const tabMetaEl = document.getElementById("tabMeta");
 const chartEl = document.getElementById("chartPlaceholder");
 const zoomBackBtn = document.getElementById("zoomBackBtn");
+const zoomResetBtn = document.getElementById("zoomResetBtn");
+const zoomRangeFillEl = document.getElementById("zoomRangeFill");
+const zoomRangeLabelEl = document.getElementById("zoomRangeLabel");
 const kpiGridEl = document.getElementById("kpiGrid");
 const topVehiclesChartEl = document.getElementById("topVehiclesChart");
 const byGroupChartEl = document.getElementById("byGroupChart");
@@ -228,11 +231,14 @@ function currentZoomRange() {
 function updateZoomControls() {
   const canBack = state.zoomStack.length > 0;
   zoomBackBtn.disabled = !canBack;
+  zoomResetBtn.disabled = !canBack;
   if (canBack) {
     const z = currentZoomRange();
     zoomBackBtn.title = `Zoom activo ${z.from} - ${z.to}. Pulsa para volver.`;
+    zoomResetBtn.title = `Resetear zoom activo ${z.from} - ${z.to}`;
   } else {
     zoomBackBtn.title = "Sin zoom activo";
+    zoomResetBtn.title = "Sin zoom activo";
   }
 }
 
@@ -430,6 +436,48 @@ function renderChart(lines) {
   `;
   updateZoomControls();
   attachChartZoomHandlers();
+}
+
+function applyDimensionFilters(rows) {
+  return rows.filter((r) => {
+    if (state.drillFilters.groupName && (r.group_name || "Sin grupo") !== state.drillFilters.groupName) {
+      return false;
+    }
+    if (state.drillFilters.fuelType && (r.fuel_type || "Unknown") !== state.drillFilters.fuelType) {
+      return false;
+    }
+    return true;
+  });
+}
+
+function renderZoomStrip(baseRows) {
+  const buckets = Array.from(new Set(baseRows.map((r) => r.bucket))).sort((a, b) => a.localeCompare(b));
+  if (!buckets.length) {
+    zoomRangeFillEl.style.left = "0%";
+    zoomRangeFillEl.style.width = "100%";
+    zoomRangeLabelEl.textContent = "Sin datos";
+    return;
+  }
+  const zoom = currentZoomRange();
+  if (!zoom) {
+    zoomRangeFillEl.style.left = "0%";
+    zoomRangeFillEl.style.width = "100%";
+    zoomRangeLabelEl.textContent = "Sin zoom";
+    return;
+  }
+  const first = buckets[0];
+  const last = buckets[buckets.length - 1];
+  const from = zoom.from < first ? first : zoom.from;
+  const to = zoom.to > last ? last : zoom.to;
+  const fromIdx = Math.max(0, buckets.indexOf(from));
+  const toIdx = Math.max(fromIdx, buckets.indexOf(to));
+  const denom = Math.max(1, buckets.length - 1);
+  const startPct = (fromIdx / denom) * 100;
+  const endPct = (toIdx / denom) * 100;
+  const widthPct = Math.max(2, endPct - startPct);
+  zoomRangeFillEl.style.left = `${startPct}%`;
+  zoomRangeFillEl.style.width = `${widthPct}%`;
+  zoomRangeLabelEl.textContent = `Zoom ${from} - ${to}`;
 }
 
 function renderKpis(rows) {
@@ -668,7 +716,8 @@ function renderPivotTable(rows) {
 
 function refreshVisualsFromRows() {
   const allRows = state.lastRows || [];
-  const rows = applyDrillFilters(allRows);
+  const dimRows = applyDimensionFilters(allRows);
+  const rows = applyDrillFilters(dimRows);
   const selected = state.selectedVehicleKeys;
   const mode = chartAggModeEl.value;
 
@@ -693,6 +742,7 @@ function refreshVisualsFromRows() {
   renderTopVehiclesChart(rows);
   renderGroupChart(allRows);
   renderFuelTypeChart(allRows);
+  renderZoomStrip(dimRows);
   renderPivotTable(rows);
   const filters = [];
   if (state.drillFilters.groupName) filters.push(`Grupo: ${state.drillFilters.groupName}`);
@@ -841,12 +891,16 @@ clearDrilldownBtn.addEventListener("click", () => {
   state.selectedVehicleKeys.clear();
   state.drillFilters.groupName = null;
   state.drillFilters.fuelType = null;
-  state.zoomStack = [];
   refreshVisualsFromRows();
 });
 zoomBackBtn.addEventListener("click", () => {
   if (!state.zoomStack.length) return;
   state.zoomStack.pop();
+  refreshVisualsFromRows();
+});
+zoomResetBtn.addEventListener("click", () => {
+  if (!state.zoomStack.length) return;
+  state.zoomStack = [];
   refreshVisualsFromRows();
 });
 byGroupChartEl.addEventListener("click", (ev) => {

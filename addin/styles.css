@@ -137,6 +137,7 @@ section {
   display: inline-flex;
   align-items: center;
   gap: 8px;
+  flex-wrap: wrap;
 }
 .zoom-hint {
   font-size: 11px;
@@ -270,6 +271,31 @@ button.secondary {
   color: var(--muted);
   border: 1px dashed var(--line);
   border-radius: 8px;
+}
+.zoom-range-strip {
+  position: relative;
+  margin-top: 8px;
+  height: 18px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+.zoom-range-fill {
+  position: absolute;
+  left: 0;
+  top: 0;
+  height: 100%;
+  width: 100%;
+  background: linear-gradient(90deg, #2563eb55, #2563eb88);
+}
+.zoom-range-label {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  color: #0f172a;
+  font-weight: 600;
 }
 table { width: 100%; border-collapse: collapse; }
 th, td { text-align: left; padding: 8px; border-bottom: 1px solid var(--line); font-size: 13px; }
