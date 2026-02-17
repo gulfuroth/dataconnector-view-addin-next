@@ -10,9 +10,11 @@ const exportBtn = document.getElementById("exportBtn");
 const connectBtn = document.getElementById("connectBtn");
 const rememberPasswordEl = document.getElementById("rememberPassword");
 const statusEl = document.getElementById("statusText");
+const tabMetaEl = document.getElementById("tabMeta");
 const chartEl = document.getElementById("chartPlaceholder");
 const tableHead = document.getElementById("dataTableHead");
 const tableBody = document.querySelector("#dataTable tbody");
+const tabButtons = Array.from(document.querySelectorAll(".tab-btn"));
 
 const mygServerEl = document.getElementById("mygServer");
 const mygDatabaseEl = document.getElementById("mygDatabase");
@@ -27,6 +29,14 @@ const state = {
   lastRows: [],
   lastPivot: null,
   selectedVehicleKeys: new Set(),
+  activeTab: "main-data",
+  tabCache: {},
+};
+
+const TAB_METRIC = {
+  "main-data": "distance",
+  "utilization": "distance",
+  "fuel": "fuel",
 };
 
 function defaultDates() {
@@ -40,6 +50,22 @@ function defaultDates() {
 function setStatus(message, isError = false) {
   statusEl.textContent = message;
   statusEl.className = isError ? "status error" : "status";
+}
+
+function tabTitle(tab) {
+  if (tab === "utilization") return "Utilization";
+  if (tab === "fuel") return "Fuel Consumption";
+  return "Main Data";
+}
+
+function updateTabUI() {
+  for (const btn of tabButtons) {
+    btn.classList.toggle("active", btn.dataset.tab === state.activeTab);
+  }
+  tabMetaEl.textContent = `Tab activa: ${tabTitle(state.activeTab)}`;
+  const metric = TAB_METRIC[state.activeTab] || "distance";
+  metricEl.value = metric;
+  metricEl.disabled = true;
 }
 
 function toggleGroup() {
@@ -363,8 +389,6 @@ function refreshVisualsFromRows() {
 
   renderChart(lines);
   renderPivotTable(rows);
-
-  setStatus(`Datos cargados. Filas base: ${rows.length}. Seleccionados: ${selected.size}`);
 }
 
 async function apiPost(path, payload) {
@@ -404,9 +428,11 @@ async function loadAndRender() {
     throw new Error("Selecciona grupo");
   }
 
+  const metric = TAB_METRIC[state.activeTab] || "distance";
+
   const payload = {
     ...getConnectionPayload(),
-    metric: metricEl.value,
+    metric,
     scope: scopeEl.value,
     groupId: groupEl.value || null,
     granularity: granularityEl.value,
@@ -414,13 +440,16 @@ async function loadAndRender() {
     to: toEl.value,
   };
 
-  const data = await apiPost("/api/query", payload);
-  state.lastRows = data.rows || [];
+  const data = await apiPost(`/api/tab/${state.activeTab}`, payload);
+  state.tabCache[state.activeTab] = data;
+  state.lastRows = data.table?.rows || data.rows || [];
   const availableKeys = new Set(buildVehicleIndex(state.lastRows).map((v) => v.key));
   state.selectedVehicleKeys = new Set(
     Array.from(state.selectedVehicleKeys).filter((k) => availableKeys.has(k)),
   );
   refreshVisualsFromRows();
+  const hitText = data.cache?.hit ? "cache hit" : "fresh";
+  setStatus(`Tab ${tabTitle(state.activeTab)} cargada (${hitText}). Filas: ${state.lastRows.length}`);
 }
 
 scopeEl.addEventListener("change", () => {
@@ -448,6 +477,22 @@ exportBtn.addEventListener("click", () => {
 connectBtn.addEventListener("click", connect);
 rememberPasswordEl.addEventListener("change", handleRememberPasswordToggle);
 chartAggModeEl.addEventListener("change", refreshVisualsFromRows);
+for (const btn of tabButtons) {
+  btn.addEventListener("click", async () => {
+    const tab = btn.dataset.tab;
+    if (!tab || tab === state.activeTab) return;
+    state.activeTab = tab;
+    state.selectedVehicleKeys.clear();
+    updateTabUI();
+    if (!state.connected) return;
+    try {
+      setStatus(`Cargando ${tabTitle(tab)}...`);
+      await loadAndRender();
+    } catch (err) {
+      setStatus(err.message, true);
+    }
+  });
+}
 tableBody.addEventListener("change", (ev) => {
   const t = ev.target;
   if (!(t instanceof HTMLInputElement)) return;
@@ -474,3 +519,4 @@ tableHead.addEventListener("change", (ev) => {
 loadConfig();
 defaultDates();
 toggleGroup();
+updateTabUI();

@@ -1,6 +1,9 @@
 import re
+import json
+import hashlib
 from collections import defaultdict
 from datetime import date
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse, urlunparse
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -53,6 +56,10 @@ DATE_COLUMN_BY_GRANULARITY = {
     "daily": "Local_Date",
     "monthly": "Local_MonthStartDate",
 }
+
+# In-memory cache foundation (single-process).
+CACHE_TTL_SECONDS = 300
+_CACHE: Dict[str, Dict] = {}
 
 
 def _ensure(v: str, name: str):
@@ -317,6 +324,35 @@ def _normalize_serials(serials: List[str]) -> List[str]:
     return sorted(set(valid))
 
 
+def _cache_key(prefix: str, payload: Dict) -> str:
+    sanitized = dict(payload)
+    if "mygPassword" in sanitized:
+        raw = str(sanitized["mygPassword"]).encode("utf-8")
+        sanitized["mygPassword"] = hashlib.sha256(raw).hexdigest()[:12]
+    raw = json.dumps(sanitized, sort_keys=True, default=str)
+    digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+    return f"{prefix}:{digest}"
+
+
+def _cache_get(key: str) -> Optional[Dict]:
+    now = datetime.now(timezone.utc)
+    hit = _CACHE.get(key)
+    if not hit:
+        return None
+    if hit["expires_at"] < now:
+        _CACHE.pop(key, None)
+        return None
+    return hit["value"]
+
+
+def _cache_set(key: str, value: Dict, ttl_seconds: int = CACHE_TTL_SECONDS):
+    now = datetime.now(timezone.utc)
+    _CACHE[key] = {
+        "value": value,
+        "expires_at": now + timedelta(seconds=ttl_seconds),
+    }
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -330,13 +366,19 @@ def connect(inp: ConnectionInput):
     _ensure(inp.mygPassword, "mygPassword")
     _ensure(inp.dcBaseUrl, "dcBaseUrl")
 
+    key = _cache_key("connect", inp.model_dump())
+    cached = _cache_get(key)
+    if cached:
+        return cached
+
     credentials = _myg_credentials(inp)
     groups = _myg_groups(inp, credentials)
-    return {"status": "ok", "groups": groups}
+    resp = {"status": "ok", "groups": groups}
+    _cache_set(key, resp, ttl_seconds=600)
+    return resp
 
 
-@app.post("/api/query")
-def query(inp: QueryInput):
+def _run_query(inp: QueryInput) -> Dict:
     if inp.scope == "group" and not inp.groupId:
         raise HTTPException(status_code=400, detail="groupId required when scope=group")
     if inp.to_date < inp.from_date:
@@ -427,6 +469,81 @@ def query(inp: QueryInput):
     points = [{"bucket": k, "value": round(v, 3)} for k, v in sorted(agg.items(), key=lambda x: x[0])]
 
     return {"rows": rows, "points": points}
+
+
+@app.post("/api/query")
+def query(inp: QueryInput):
+    return _run_query(inp)
+
+
+def _build_tab_payload(tab: str, metric: str, query_data: Dict, cache_hit: bool) -> Dict:
+    rows = query_data.get("rows", [])
+    points = query_data.get("points", [])
+    serials = {r["device_serial"] for r in rows}
+    total_value = sum(float(r.get("value") or 0) for r in rows)
+    avg_per_vehicle = (total_value / len(serials)) if serials else 0.0
+
+    return {
+        "tab": tab,
+        "metric": metric,
+        "cache": {"hit": cache_hit, "ttl_seconds": CACHE_TTL_SECONDS},
+        "kpis": {
+            "vehicles_count": len(serials),
+            "rows_count": len(rows),
+            "total_value": round(total_value, 2),
+            "avg_per_vehicle": round(avg_per_vehicle, 2),
+        },
+        "chart": {"points": points},
+        "table": {"rows": rows},
+        "fetched_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+@app.post("/api/tab/{tab_name}")
+def query_tab(tab_name: str, inp: QueryInput):
+    valid_tabs = {"main-data", "utilization", "fuel"}
+    if tab_name not in valid_tabs:
+        raise HTTPException(status_code=404, detail=f"Unknown tab '{tab_name}'")
+
+    metric_by_tab = {
+        "main-data": "distance",
+        "utilization": "distance",
+        "fuel": "fuel",
+    }
+    inp.metric = metric_by_tab.get(tab_name, inp.metric)
+
+    payload_key = _cache_key(
+        f"tab:{tab_name}",
+        {
+            **inp.model_dump(by_alias=True),
+            "tab_name": tab_name,
+            "metric": inp.metric,
+        },
+    )
+    cached = _cache_get(payload_key)
+    if cached:
+        cached_resp = dict(cached)
+        cached_resp["cache"] = dict(cached.get("cache") or {})
+        cached_resp["cache"]["hit"] = True
+        return cached_resp
+
+    query_data = _run_query(inp)
+    response = _build_tab_payload(tab_name, inp.metric, query_data, cache_hit=False)
+    _cache_set(payload_key, response)
+    return response
+
+
+@app.get("/api/cache/stats")
+def cache_stats():
+    now = datetime.now(timezone.utc)
+    active = 0
+    expired = 0
+    for v in _CACHE.values():
+        if v["expires_at"] >= now:
+            active += 1
+        else:
+            expired += 1
+    return {"active": active, "expired": expired, "ttl_seconds": CACHE_TTL_SECONDS}
 
 
 # Optional local static serving for dev/testing.

@@ -18,6 +18,16 @@ La UI está en `addin/` y las llamadas a MyGeotab/Data Connector pasan por `back
 - `docs/`: planificación y arquitectura.
 - `backend/`: API proxy necesaria para MyGeotab + Data Connector.
 
+## Foundation vNext
+
+- UI por tabs: `Main Data`, `Utilization`, `Fuel Consumption`.
+- Backend con cache in-memory por tab/filtros (TTL 5 min).
+- Endpoints nuevos:
+  - `POST /api/tab/main-data`
+  - `POST /api/tab/utilization`
+  - `POST /api/tab/fuel`
+  - `GET /api/cache/stats`
+
 ## Cómo usar
 
 1. Arrancar backend:

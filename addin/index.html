@@ -10,7 +10,7 @@
   <main class="container">
     <header>
       <h1>Data Connector View</h1>
-      <p>Modo frontend-only: lógica en JS/HTML (sin backend propio)</p>
+      <p>Vista analítica por tabs (Main Data, Utilization, Fuel) sobre backend cacheado</p>
       <div id="statusText" class="status">Configura conexiones y pulsa Conectar</div>
     </header>
 
@@ -97,6 +97,15 @@
 
       <button id="refreshBtn">Actualizar</button>
       <button id="exportBtn" class="secondary">Export Tabla CSV</button>
+    </section>
+
+    <section class="tabs-box">
+      <div class="tabs">
+        <button class="tab-btn active" data-tab="main-data" type="button">Main Data</button>
+        <button class="tab-btn" data-tab="utilization" type="button">Utilization</button>
+        <button class="tab-btn" data-tab="fuel" type="button">Fuel Consumption</button>
+      </div>
+      <div id="tabMeta" class="tab-meta">Tab activa: Main Data</div>
     </section>
 
     <section class="chart-box">
