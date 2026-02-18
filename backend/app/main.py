@@ -61,6 +61,7 @@ DATE_COLUMN_BY_GRANULARITY = {
 # In-memory cache foundation (single-process).
 CACHE_TTL_SECONDS = 300
 _CACHE: Dict[str, Dict] = {}
+_META_CACHE: Dict[str, Dict] = {}
 
 
 def _ensure(v: str, name: str):
@@ -383,8 +384,10 @@ def _dc_query_with_fallback(
         except HTTPException as exc:
             last_error = exc
             detail = str(exc.detail)
-            # Retry on 401/403 once using alternate known host.
-            if exc.status_code == 502 and ("HTTP 401" in detail or "HTTP 403" in detail) and idx < len(candidates) - 1:
+            # Retry on auth/permission/not-found once using alternate known host.
+            if exc.status_code == 502 and (
+                "HTTP 401" in detail or "HTTP 403" in detail or "HTTP 404" in detail
+            ) and idx < len(candidates) - 1:
                 continue
             raise
 
@@ -407,6 +410,63 @@ def _dc_candidate_base_urls(base_url: str) -> List[str]:
         alt = urlunparse((parsed.scheme, "odata-connector-1.geotab.com", parsed.path, "", "", ""))
         if alt not in out:
             out.append(alt.rstrip("/"))
+    return out
+
+
+def _dc_entity_sets(base_url: str, auth_header: str) -> List[str]:
+    cache_key = f"meta:{_cache_key('dc-meta', {'base_url': base_url, 'auth': auth_header[:24]})}"
+    hit = _META_CACHE.get(cache_key)
+    now = datetime.now(timezone.utc)
+    if hit and hit.get("expires_at") and hit["expires_at"] >= now:
+        return hit.get("value", [])
+
+    candidates = _dc_candidate_base_urls(base_url)
+    headers = {"Accept": "application/xml", "Authorization": auth_header}
+    names: List[str] = []
+
+    for candidate in candidates:
+        url = f"{candidate}/$metadata"
+        try:
+            res = requests.get(url, headers=headers, timeout=60)
+            if not res.ok:
+                if res.status_code in (401, 403, 404):
+                    continue
+                continue
+            txt = res.text or ""
+            names = re.findall(r'<EntitySet\\s+Name="([^"]+)"', txt)
+            if names:
+                break
+        except requests.RequestException:
+            continue
+
+    _META_CACHE[cache_key] = {
+        "value": names,
+        "expires_at": now + timedelta(seconds=900),
+    }
+    return names
+
+
+def _hourly_table_candidates(base_url: str, auth_header: str) -> List[str]:
+    static_candidates = [
+        "VehicleKpi_Hourly",
+        "VehicleKPI_Hourly",
+        "VehicleKpiHourly",
+        "VehicleKpi_Hour",
+        "VehicleKpiHour",
+    ]
+    out: List[str] = []
+    seen = set()
+    for c in static_candidates:
+        if c not in seen:
+            out.append(c)
+            seen.add(c)
+
+    from_meta = _dc_entity_sets(base_url, auth_header)
+    for name in from_meta:
+        low = name.lower()
+        if "vehiclekpi" in low and "hour" in low and name not in seen:
+            out.insert(0, name)
+            seen.add(name)
     return out
 
 
@@ -629,51 +689,54 @@ def _query_hourly_activity(
     to_date: date,
     allowed_serials: Optional[List[str]] = None,
 ) -> List[Dict]:
-    table = "VehicleKpi_Hourly"
+    table_candidates = _hourly_table_candidates(base_url, auth_header)
     date_candidates = ["Local_HourStartDate", "Local_DateTime", "DateTime"]
     metric_candidates = ["GPS_Distance_Km", "Distance_Km", "EngineHours_Hours"]
     search_expr = f"from_{from_date.isoformat()}_to_{to_date.isoformat()}"
     allowed_set = set(_normalize_serials(allowed_serials or [])) if allowed_serials else None
 
     last_err: Optional[HTTPException] = None
-    for date_col in date_candidates:
-        for metric_col in metric_candidates:
-            try:
-                rows = _dc_query_with_fallback(
-                    base_url,
-                    auth_header,
-                    table,
-                    [date_col, "SerialNo", metric_col],
-                    None,
-                    search_expr,
-                )
-                out = []
-                for r in rows:
-                    serial = (r.get("SerialNo") or "").strip()
-                    if not serial:
-                        continue
-                    if allowed_set is not None and serial not in allowed_set:
-                        continue
-                    raw = str(r.get(date_col) or "")
-                    parsed = _date_hour_key(raw)
-                    if not parsed:
-                        continue
-                    value = float(r.get(metric_col) or 0.0)
-                    out.append(
-                        {
-                            "serial": serial,
-                            "date": parsed[0],
-                            "hour": parsed[1],
-                            "active": value > 0,
-                        }
+    for table in table_candidates:
+        for date_col in date_candidates:
+            for metric_col in metric_candidates:
+                try:
+                    rows = _dc_query_with_fallback(
+                        base_url,
+                        auth_header,
+                        table,
+                        [date_col, "SerialNo", metric_col],
+                        None,
+                        search_expr,
                     )
-                return out
-            except HTTPException as exc:
-                last_err = exc
-                detail = str(exc.detail)
-                if exc.status_code == 502 and "Invalid Parameter" in detail:
-                    continue
-                raise
+                    out = []
+                    for r in rows:
+                        serial = (r.get("SerialNo") or "").strip()
+                        if not serial:
+                            continue
+                        if allowed_set is not None and serial not in allowed_set:
+                            continue
+                        raw = str(r.get(date_col) or "")
+                        parsed = _date_hour_key(raw)
+                        if not parsed:
+                            continue
+                        value = float(r.get(metric_col) or 0.0)
+                        out.append(
+                            {
+                                "serial": serial,
+                                "date": parsed[0],
+                                "hour": parsed[1],
+                                "active": value > 0,
+                            }
+                        )
+                    return out
+                except HTTPException as exc:
+                    last_err = exc
+                    detail = str(exc.detail)
+                    if exc.status_code == 502 and (
+                        "Invalid Parameter" in detail or "HTTP 404" in detail or "Metadata is Not Found" in detail
+                    ):
+                        continue
+                    raise
     if last_err:
         raise last_err
     return []
