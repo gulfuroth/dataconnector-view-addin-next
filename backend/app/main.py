@@ -383,8 +383,8 @@ def _dc_query_with_fallback(
         except HTTPException as exc:
             last_error = exc
             detail = str(exc.detail)
-            # Retry on 403 once using alternate known host.
-            if exc.status_code == 502 and "HTTP 403" in detail and idx < len(candidates) - 1:
+            # Retry on 401/403 once using alternate known host.
+            if exc.status_code == 502 and ("HTTP 401" in detail or "HTTP 403" in detail) and idx < len(candidates) - 1:
                 continue
             raise
 
@@ -836,9 +836,20 @@ def query_tab(tab_name: str, inp: QueryInput):
             key = f"{r.get('bucket')}|||{r.get('device_serial')}"
             r["distance_value"] = distance_map.get(key, 0.0)
     if tab_name == "utilization":
-        credentials = _myg_credentials(inp)
-        auth_header = _dc_auth_header(inp.mygDatabase, inp.mygUser, inp.mygPassword)
-        extras["utilization"] = _build_utilization_payload(inp, credentials, auth_header)
+        try:
+            credentials = _myg_credentials(inp)
+            auth_header = _dc_auth_header(inp.mygDatabase, inp.mygUser, inp.mygPassword)
+            extras["utilization"] = _build_utilization_payload(inp, credentials, auth_header)
+        except HTTPException as exc:
+            extras["utilization"] = {
+                "vehicles_count": 0,
+                "hours_of_utilization_pct": 0.0,
+                "hours_of_utilization_vs_prev_pct": 0.0,
+                "hourly_pct": [{"hour": h, "pct": 0.0} for h in range(24)],
+                "monthly_pct": [],
+                "timezone": "database-local",
+                "error": str(exc.detail),
+            }
     response = _build_tab_payload(tab_name, inp.metric, query_data, cache_hit=False)
     response.update(extras)
     _cache_set(payload_key, response)

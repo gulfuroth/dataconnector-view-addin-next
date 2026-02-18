@@ -751,6 +751,7 @@ function renderUtilizationInsights(rows, tabPayload) {
         <div class="insight-sub">Vehículos analizados: ${util.vehicles_count || 0}</div>
         <div class="insight-sub">Timezone: ${escapeHtml(util.timezone || "database-local")}</div>
         <div class="insight-sub">Comparativa: ${(util.comparison_period?.from || "-")} a ${(util.comparison_period?.to || "-")}</div>
+        ${util.error ? `<div class="insight-sub delta down">Detalle error: ${escapeHtml(util.error)}</div>` : ""}
       </article>
     `;
     return;
