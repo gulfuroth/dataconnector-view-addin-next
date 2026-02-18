@@ -502,15 +502,9 @@ def _run_query(inp: QueryInput) -> Dict:
     credentials = _myg_credentials(inp)
     auth_header = _dc_auth_header(inp.mygDatabase, inp.mygUser, inp.mygPassword)
 
-    allowed_serials: List[str] = []
-    if inp.scope == "group":
-        # First try Data Connector DeviceGroups mapping (planned v1 enhancement).
-        allowed_serials = _dc_device_serials_by_group(inp.dcBaseUrl, auth_header, inp.groupId or "")
-        # Fallback to MyGeotab group lookup if DC mapping is unavailable for this tenant.
-        if not allowed_serials:
-            allowed_serials = _myg_device_serials_by_group(credentials, inp.mygServer, inp.groupId or "")
-        if not allowed_serials:
-            return {"rows": [], "points": []}
+    allowed_serials = _resolve_allowed_serials(inp, credentials, auth_header)
+    if inp.scope == "group" and not allowed_serials:
+        return {"rows": [], "points": []}
 
     metric_candidates = METRIC_CANDIDATES[inp.metric]
     date_col = DATE_COLUMN_BY_GRANULARITY[inp.granularity]
@@ -600,6 +594,177 @@ def _run_query(inp: QueryInput) -> Dict:
     return {"rows": rows, "points": points}
 
 
+def _resolve_allowed_serials(inp: QueryInput, credentials: Dict, auth_header: str) -> List[str]:
+    allowed_serials: List[str] = []
+    if inp.scope != "group":
+        return allowed_serials
+    # First try Data Connector DeviceGroups mapping.
+    allowed_serials = _dc_device_serials_by_group(inp.dcBaseUrl, auth_header, inp.groupId or "")
+    # Fallback to MyGeotab group lookup if DC mapping is unavailable for this tenant.
+    if not allowed_serials:
+        allowed_serials = _myg_device_serials_by_group(credentials, inp.mygServer, inp.groupId or "")
+    return allowed_serials
+
+
+def _date_hour_key(raw: str) -> Optional[tuple]:
+    if not raw:
+        return None
+    txt = str(raw).strip()
+    if txt.endswith("Z"):
+        txt = txt[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(txt)
+    except ValueError:
+        m = re.match(r"^(\d{4}-\d{2}-\d{2})[T\s](\d{2})", txt)
+        if not m:
+            return None
+        return (m.group(1), int(m.group(2)))
+    return (dt.date().isoformat(), int(dt.hour))
+
+
+def _query_hourly_activity(
+    base_url: str,
+    auth_header: str,
+    from_date: date,
+    to_date: date,
+    allowed_serials: Optional[List[str]] = None,
+) -> List[Dict]:
+    table = "VehicleKpi_Hourly"
+    date_candidates = ["Local_HourStartDate", "Local_DateTime", "DateTime"]
+    metric_candidates = ["GPS_Distance_Km", "Distance_Km", "EngineHours_Hours"]
+    search_expr = f"from_{from_date.isoformat()}_to_{to_date.isoformat()}"
+    allowed_set = set(_normalize_serials(allowed_serials or [])) if allowed_serials else None
+
+    last_err: Optional[HTTPException] = None
+    for date_col in date_candidates:
+        for metric_col in metric_candidates:
+            try:
+                rows = _dc_query_with_fallback(
+                    base_url,
+                    auth_header,
+                    table,
+                    [date_col, "SerialNo", metric_col],
+                    None,
+                    search_expr,
+                )
+                out = []
+                for r in rows:
+                    serial = (r.get("SerialNo") or "").strip()
+                    if not serial:
+                        continue
+                    if allowed_set is not None and serial not in allowed_set:
+                        continue
+                    raw = str(r.get(date_col) or "")
+                    parsed = _date_hour_key(raw)
+                    if not parsed:
+                        continue
+                    value = float(r.get(metric_col) or 0.0)
+                    out.append(
+                        {
+                            "serial": serial,
+                            "date": parsed[0],
+                            "hour": parsed[1],
+                            "active": value > 0,
+                        }
+                    )
+                return out
+            except HTTPException as exc:
+                last_err = exc
+                detail = str(exc.detail)
+                if exc.status_code == 502 and "Invalid Parameter" in detail:
+                    continue
+                raise
+    if last_err:
+        raise last_err
+    return []
+
+
+def _build_utilization_payload(
+    inp: QueryInput,
+    credentials: Dict,
+    auth_header: str,
+) -> Dict:
+    allowed_serials = _resolve_allowed_serials(inp, credentials, auth_header)
+    if inp.scope == "group" and not allowed_serials:
+        return {
+            "vehicles_count": 0,
+            "hours_of_utilization_pct": 0.0,
+            "hours_of_utilization_vs_prev_pct": 0.0,
+            "hourly_pct": [{"hour": h, "pct": 0.0} for h in range(24)],
+            "monthly_pct": [],
+            "timezone": "database-local",
+        }
+
+    current = _query_hourly_activity(inp.dcBaseUrl, auth_header, inp.from_date, inp.to_date, allowed_serials)
+
+    duration_days = max(1, (inp.to_date - inp.from_date).days + 1)
+    prev_to = inp.from_date - timedelta(days=1)
+    prev_from = prev_to - timedelta(days=duration_days - 1)
+    previous = _query_hourly_activity(inp.dcBaseUrl, auth_header, prev_from, prev_to, allowed_serials)
+
+    serials = set([r["serial"] for r in current]) | set(_normalize_serials(allowed_serials))
+    vehicles_count = len(serials)
+    if vehicles_count == 0:
+        return {
+            "vehicles_count": 0,
+            "hours_of_utilization_pct": 0.0,
+            "hours_of_utilization_vs_prev_pct": 0.0,
+            "hourly_pct": [{"hour": h, "pct": 0.0} for h in range(24)],
+            "monthly_pct": [],
+            "timezone": "database-local",
+        }
+
+    date_set = set([r["date"] for r in current])
+    days_count = max(1, len(date_set))
+
+    active_pairs = set([(r["date"], r["hour"], r["serial"]) for r in current if r["active"]])
+    active_vehicle_hours = len(active_pairs)
+    total_vehicle_hours = vehicles_count * days_count * 24
+    hours_of_utilization_pct = (active_vehicle_hours / total_vehicle_hours * 100.0) if total_vehicle_hours else 0.0
+
+    by_hour_active_pairs: Dict[int, set] = {h: set() for h in range(24)}
+    for (d, h, s) in active_pairs:
+        by_hour_active_pairs[h].add((d, s))
+    hourly_pct = []
+    per_hour_total = vehicles_count * days_count
+    for h in range(24):
+        active = len(by_hour_active_pairs[h])
+        pct = (active / per_hour_total * 100.0) if per_hour_total else 0.0
+        hourly_pct.append({"hour": h, "pct": round(pct, 3)})
+
+    prev_serials = set([r["serial"] for r in previous]) | set(_normalize_serials(allowed_serials))
+    prev_vehicles = max(1, len(prev_serials)) if prev_serials else vehicles_count
+    prev_dates = set([r["date"] for r in previous])
+    prev_days = max(1, len(prev_dates))
+    prev_active_pairs = set([(r["date"], r["hour"], r["serial"]) for r in previous if r["active"]])
+    prev_total = prev_vehicles * prev_days * 24
+    prev_pct = (len(prev_active_pairs) / prev_total * 100.0) if prev_total else 0.0
+
+    by_month_pairs: Dict[str, set] = defaultdict(set)
+    for (d, h, s) in active_pairs:
+        month = d[:7]
+        by_month_pairs[month].add((d, h, s))
+    by_month_days: Dict[str, set] = defaultdict(set)
+    for d in date_set:
+        by_month_days[d[:7]].add(d)
+    monthly_pct = []
+    for month in sorted(by_month_pairs.keys()):
+        month_days = max(1, len(by_month_days.get(month, set())))
+        denom = vehicles_count * month_days * 24
+        pct = (len(by_month_pairs[month]) / denom * 100.0) if denom else 0.0
+        monthly_pct.append({"bucket": month, "pct": round(pct, 3)})
+
+    return {
+        "vehicles_count": vehicles_count,
+        "hours_of_utilization_pct": round(hours_of_utilization_pct, 3),
+        "hours_of_utilization_vs_prev_pct": round(hours_of_utilization_pct - prev_pct, 3),
+        "hourly_pct": hourly_pct,
+        "monthly_pct": monthly_pct,
+        "comparison_period": {"from": prev_from.isoformat(), "to": prev_to.isoformat()},
+        "timezone": "database-local",
+    }
+
+
 @app.post("/api/query")
 def query(inp: QueryInput):
     return _run_query(inp)
@@ -657,6 +822,7 @@ def query_tab(tab_name: str, inp: QueryInput):
         return cached_resp
 
     query_data = _run_query(inp)
+    extras: Dict = {}
     # Fuel view needs distance context to compute consumption (L/100km) in the UI.
     if tab_name == "fuel":
         distance_inp = QueryInput(**deepcopy(inp.model_dump(by_alias=True)))
@@ -669,7 +835,12 @@ def query_tab(tab_name: str, inp: QueryInput):
         for r in query_data.get("rows", []):
             key = f"{r.get('bucket')}|||{r.get('device_serial')}"
             r["distance_value"] = distance_map.get(key, 0.0)
+    if tab_name == "utilization":
+        credentials = _myg_credentials(inp)
+        auth_header = _dc_auth_header(inp.mygDatabase, inp.mygUser, inp.mygPassword)
+        extras["utilization"] = _build_utilization_payload(inp, credentials, auth_header)
     response = _build_tab_payload(tab_name, inp.metric, query_data, cache_hit=False)
+    response.update(extras)
     _cache_set(payload_key, response)
     return response
 

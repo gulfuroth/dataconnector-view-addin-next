@@ -290,6 +290,12 @@ section {
   height: 100%;
   background: #2563eb;
 }
+.mini-fill.util-hour {
+  background: #0f766e;
+}
+.mini-fill.util-month {
+  background: #1d4ed8;
+}
 .mini-val {
   text-align: right;
   font-weight: 600;
@@ -303,6 +309,14 @@ section {
 .insight-sub {
   font-size: 12px;
   color: var(--muted);
+}
+.insight-sub.delta.up {
+  color: #047857;
+  font-weight: 600;
+}
+.insight-sub.delta.down {
+  color: #b91c1c;
+  font-weight: 600;
 }
 label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
 select, input, button {
