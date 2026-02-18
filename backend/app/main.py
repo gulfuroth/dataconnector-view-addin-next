@@ -433,7 +433,8 @@ def _dc_entity_sets(base_url: str, auth_header: str) -> List[str]:
                     continue
                 continue
             txt = res.text or ""
-            names = re.findall(r'<EntitySet\\s+Name="([^"]+)"', txt)
+            # Support plain and namespaced tags: <EntitySet ...> or <edm:EntitySet ...>
+            names = re.findall(r'<(?:\w+:)?EntitySet\s+[^>]*Name="([^"]+)"', txt)
             if names:
                 break
         except requests.RequestException:
