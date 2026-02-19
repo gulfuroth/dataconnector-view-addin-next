@@ -710,45 +710,36 @@ function renderMainDataInsights(rows) {
 
 function renderUtilizationInsights(rows, tabPayload) {
   const util = tabPayload?.utilization;
-  if (util && Array.isArray(util.hourly_pct)) {
-    const maxHour = Math.max(...util.hourly_pct.map((x) => Number(x.pct) || 0), 1);
-    const hourlyRows = util.hourly_pct.map((x) => `
-      <div class="mini-row">
-        <div class="mini-label">${String(x.hour).padStart(2, "0")}:00</div>
-        <div class="mini-track"><div class="mini-fill util-hour" style="width:${Math.max(2, ((Number(x.pct) || 0) / maxHour) * 100)}%"></div></div>
-        <div class="mini-val">${(Number(x.pct) || 0).toFixed(1)}%</div>
-      </div>
-    `).join("");
-
-    const monthly = Array.isArray(util.monthly_pct) ? util.monthly_pct : [];
-    const maxMonth = Math.max(...monthly.map((x) => Number(x.pct) || 0), 1);
-    const monthlyRows = monthly.map((x) => `
+  if (util && Array.isArray(util.bucket_pct)) {
+    const buckets = Array.isArray(util.bucket_pct) ? util.bucket_pct : [];
+    const maxBucket = Math.max(...buckets.map((x) => Number(x.pct) || 0), 1);
+    const bucketRows = buckets.map((x) => `
       <div class="mini-row">
         <div class="mini-label">${escapeHtml(x.bucket)}</div>
-        <div class="mini-track"><div class="mini-fill util-month" style="width:${Math.max(2, ((Number(x.pct) || 0) / maxMonth) * 100)}%"></div></div>
+        <div class="mini-track"><div class="mini-fill util-month" style="width:${Math.max(2, ((Number(x.pct) || 0) / maxBucket) * 100)}%"></div></div>
         <div class="mini-val">${(Number(x.pct) || 0).toFixed(1)}%</div>
       </div>
     `).join("");
-
-    const delta = Number(util.hours_of_utilization_vs_prev_pct) || 0;
+    const delta = Number(util.utilization_vs_prev_pct) || 0;
     const deltaClass = delta >= 0 ? "up" : "down";
+    const granLabel = util.granularity === "monthly" ? "mes" : "día";
     tabInsightsGridEl.innerHTML = `
       <article class="insight-card">
-        <h3 class="insight-title">Hours of utilization vs 24h</h3>
-        <div class="insight-metric">${(Number(util.hours_of_utilization_pct) || 0).toFixed(2)}%</div>
+        <h3 class="insight-title">Utilización de flota</h3>
+        <div class="insight-metric">${(Number(util.utilization_pct) || 0).toFixed(2)}%</div>
         <div class="insight-sub delta ${deltaClass}">${delta >= 0 ? "+" : ""}${delta.toFixed(2)} pp vs periodo anterior equivalente</div>
       </article>
       <article class="insight-card">
-        <h3 class="insight-title">Hour of utilization by time slot</h3>
-        <div class="mini-bars">${hourlyRows}</div>
+        <h3 class="insight-title">Utilización por ${granLabel}</h3>
+        <div class="mini-bars">${bucketRows || '<div class="insight-sub">Sin datos</div>'}</div>
       </article>
       <article class="insight-card">
-        <h3 class="insight-title">Evolución últimos meses</h3>
-        <div class="mini-bars">${monthlyRows || '<div class="insight-sub">Sin datos</div>'}</div>
+        <h3 class="insight-title">Actividad en periodo</h3>
+        <div class="insight-sub">Vehículos activos: ${util.active_vehicles || 0}</div>
+        <div class="insight-sub">Vehículos analizados: ${util.vehicles_count || 0}</div>
       </article>
       <article class="insight-card">
         <h3 class="insight-title">Contexto</h3>
-        <div class="insight-sub">Vehículos analizados: ${util.vehicles_count || 0}</div>
         <div class="insight-sub">Timezone: ${escapeHtml(util.timezone || "database-local")}</div>
         <div class="insight-sub">Comparativa: ${(util.comparison_period?.from || "-")} a ${(util.comparison_period?.to || "-")}</div>
         ${util.error ? `<div class="insight-sub delta down">Detalle error: ${escapeHtml(util.error)}</div>` : ""}

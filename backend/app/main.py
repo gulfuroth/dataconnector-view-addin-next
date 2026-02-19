@@ -58,19 +58,6 @@ DATE_COLUMN_BY_GRANULARITY = {
     "monthly": "Local_MonthStartDate",
 }
 
-# Utilization hourly extraction should follow the same fixed-table probing style
-# used for Daily/Monthly (no metadata discovery dependency).
-HOURLY_TABLE_CANDIDATES = [
-    "VehicleKpi_Hourly",
-    "VehicleKPI_Hourly",
-    "VehicleKpiHourly",
-]
-HOURLY_DATE_COLUMN_CANDIDATES = [
-    "Local_HourStartDate",
-    "Local_DateTime",
-    "DateTime",
-]
-
 # In-memory cache foundation (single-process).
 CACHE_TTL_SECONDS = 300
 _CACHE: Dict[str, Dict] = {}
@@ -621,164 +608,51 @@ def _resolve_allowed_serials(inp: QueryInput, credentials: Dict, auth_header: st
     return allowed_serials
 
 
-def _date_hour_key(raw: str) -> Optional[tuple]:
-    if not raw:
-        return None
-    txt = str(raw).strip()
-    if txt.endswith("Z"):
-        txt = txt[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(txt)
-    except ValueError:
-        m = re.match(r"^(\d{4}-\d{2}-\d{2})[T\s](\d{2})", txt)
-        if not m:
-            return None
-        return (m.group(1), int(m.group(2)))
-    return (dt.date().isoformat(), int(dt.hour))
-
-
-def _query_hourly_activity(
-    base_url: str,
-    auth_header: str,
-    from_date: date,
-    to_date: date,
-    allowed_serials: Optional[List[str]] = None,
-) -> List[Dict]:
-    table_candidates = HOURLY_TABLE_CANDIDATES
-    date_candidates = HOURLY_DATE_COLUMN_CANDIDATES
-    metric_candidates = ["GPS_Distance_Km", "Distance_Km", "EngineHours_Hours"]
-    search_expr = f"from_{from_date.isoformat()}_to_{to_date.isoformat()}"
-    allowed_set = set(_normalize_serials(allowed_serials or [])) if allowed_serials else None
-
-    last_err: Optional[HTTPException] = None
-    for table in table_candidates:
-        for date_col in date_candidates:
-            for metric_col in metric_candidates:
-                try:
-                    rows = _dc_query_with_fallback(
-                        base_url,
-                        auth_header,
-                        table,
-                        [date_col, "SerialNo", metric_col],
-                        None,
-                        search_expr,
-                    )
-                    out = []
-                    for r in rows:
-                        serial = (r.get("SerialNo") or "").strip()
-                        if not serial:
-                            continue
-                        if allowed_set is not None and serial not in allowed_set:
-                            continue
-                        raw = str(r.get(date_col) or "")
-                        parsed = _date_hour_key(raw)
-                        if not parsed:
-                            continue
-                        value = float(r.get(metric_col) or 0.0)
-                        out.append(
-                            {
-                                "serial": serial,
-                                "date": parsed[0],
-                                "hour": parsed[1],
-                                "active": value > 0,
-                            }
-                        )
-                    return out
-                except HTTPException as exc:
-                    last_err = exc
-                    detail = str(exc.detail)
-                    if exc.status_code == 502 and (
-                        "Invalid Parameter" in detail or "HTTP 404" in detail
-                    ):
-                        continue
-                    raise
-    if last_err:
-        raise last_err
-    return []
-
-
-def _build_utilization_payload(
-    inp: QueryInput,
-    credentials: Dict,
-    auth_header: str,
+def _utilization_payload_from_query_rows(
+    current_rows: List[Dict],
+    previous_rows: List[Dict],
+    comparison_period: Dict[str, str],
+    granularity: str,
 ) -> Dict:
-    allowed_serials = _resolve_allowed_serials(inp, credentials, auth_header)
-    if inp.scope == "group" and not allowed_serials:
-        return {
-            "vehicles_count": 0,
-            "hours_of_utilization_pct": 0.0,
-            "hours_of_utilization_vs_prev_pct": 0.0,
-            "hourly_pct": [{"hour": h, "pct": 0.0} for h in range(24)],
-            "monthly_pct": [],
-            "timezone": "database-local",
-        }
+    def active_pct(rows: List[Dict]) -> tuple:
+        by_serial: Dict[str, float] = defaultdict(float)
+        for r in rows:
+            serial = (r.get("device_serial") or "").strip()
+            if not serial:
+                continue
+            by_serial[serial] += float(r.get("value") or 0.0)
+        total = len(by_serial)
+        active = len([v for v in by_serial.values() if v > 0])
+        pct = (active / total * 100.0) if total else 0.0
+        return (pct, total, active)
 
-    current = _query_hourly_activity(inp.dcBaseUrl, auth_header, inp.from_date, inp.to_date, allowed_serials)
+    current_pct, vehicles_count, active_vehicles = active_pct(current_rows)
+    previous_pct, _, _ = active_pct(previous_rows)
 
-    duration_days = max(1, (inp.to_date - inp.from_date).days + 1)
-    prev_to = inp.from_date - timedelta(days=1)
-    prev_from = prev_to - timedelta(days=duration_days - 1)
-    previous = _query_hourly_activity(inp.dcBaseUrl, auth_header, prev_from, prev_to, allowed_serials)
-
-    serials = set([r["serial"] for r in current]) | set(_normalize_serials(allowed_serials))
-    vehicles_count = len(serials)
-    if vehicles_count == 0:
-        return {
-            "vehicles_count": 0,
-            "hours_of_utilization_pct": 0.0,
-            "hours_of_utilization_vs_prev_pct": 0.0,
-            "hourly_pct": [{"hour": h, "pct": 0.0} for h in range(24)],
-            "monthly_pct": [],
-            "timezone": "database-local",
-        }
-
-    date_set = set([r["date"] for r in current])
-    days_count = max(1, len(date_set))
-
-    active_pairs = set([(r["date"], r["hour"], r["serial"]) for r in current if r["active"]])
-    active_vehicle_hours = len(active_pairs)
-    total_vehicle_hours = vehicles_count * days_count * 24
-    hours_of_utilization_pct = (active_vehicle_hours / total_vehicle_hours * 100.0) if total_vehicle_hours else 0.0
-
-    by_hour_active_pairs: Dict[int, set] = {h: set() for h in range(24)}
-    for (d, h, s) in active_pairs:
-        by_hour_active_pairs[h].add((d, s))
-    hourly_pct = []
-    per_hour_total = vehicles_count * days_count
-    for h in range(24):
-        active = len(by_hour_active_pairs[h])
-        pct = (active / per_hour_total * 100.0) if per_hour_total else 0.0
-        hourly_pct.append({"hour": h, "pct": round(pct, 3)})
-
-    prev_serials = set([r["serial"] for r in previous]) | set(_normalize_serials(allowed_serials))
-    prev_vehicles = max(1, len(prev_serials)) if prev_serials else vehicles_count
-    prev_dates = set([r["date"] for r in previous])
-    prev_days = max(1, len(prev_dates))
-    prev_active_pairs = set([(r["date"], r["hour"], r["serial"]) for r in previous if r["active"]])
-    prev_total = prev_vehicles * prev_days * 24
-    prev_pct = (len(prev_active_pairs) / prev_total * 100.0) if prev_total else 0.0
-
-    by_month_pairs: Dict[str, set] = defaultdict(set)
-    for (d, h, s) in active_pairs:
-        month = d[:7]
-        by_month_pairs[month].add((d, h, s))
-    by_month_days: Dict[str, set] = defaultdict(set)
-    for d in date_set:
-        by_month_days[d[:7]].add(d)
-    monthly_pct = []
-    for month in sorted(by_month_pairs.keys()):
-        month_days = max(1, len(by_month_days.get(month, set())))
-        denom = vehicles_count * month_days * 24
-        pct = (len(by_month_pairs[month]) / denom * 100.0) if denom else 0.0
-        monthly_pct.append({"bucket": month, "pct": round(pct, 3)})
+    by_bucket_active: Dict[str, set] = defaultdict(set)
+    serials_all = set()
+    for r in current_rows:
+        serial = (r.get("device_serial") or "").strip()
+        bucket = (r.get("bucket") or "").strip()
+        if not serial or not bucket:
+            continue
+        serials_all.add(serial)
+        if float(r.get("value") or 0.0) > 0:
+            by_bucket_active[bucket].add(serial)
+    denom = len(serials_all) if serials_all else vehicles_count
+    bucket_pct = []
+    for bucket in sorted(by_bucket_active.keys()):
+        pct = (len(by_bucket_active[bucket]) / denom * 100.0) if denom else 0.0
+        bucket_pct.append({"bucket": bucket, "pct": round(pct, 3)})
 
     return {
         "vehicles_count": vehicles_count,
-        "hours_of_utilization_pct": round(hours_of_utilization_pct, 3),
-        "hours_of_utilization_vs_prev_pct": round(hours_of_utilization_pct - prev_pct, 3),
-        "hourly_pct": hourly_pct,
-        "monthly_pct": monthly_pct,
-        "comparison_period": {"from": prev_from.isoformat(), "to": prev_to.isoformat()},
+        "active_vehicles": active_vehicles,
+        "utilization_pct": round(current_pct, 3),
+        "utilization_vs_prev_pct": round(current_pct - previous_pct, 3),
+        "bucket_pct": bucket_pct,
+        "granularity": granularity,
+        "comparison_period": comparison_period,
         "timezone": "database-local",
     }
 
@@ -855,16 +729,27 @@ def query_tab(tab_name: str, inp: QueryInput):
             r["distance_value"] = distance_map.get(key, 0.0)
     if tab_name == "utilization":
         try:
-            credentials = _myg_credentials(inp)
-            auth_header = _dc_auth_header(inp.mygDatabase, inp.mygUser, inp.mygPassword)
-            extras["utilization"] = _build_utilization_payload(inp, credentials, auth_header)
+            duration_days = max(1, (inp.to_date - inp.from_date).days + 1)
+            prev_to = inp.from_date - timedelta(days=1)
+            prev_from = prev_to - timedelta(days=duration_days - 1)
+            prev_inp = QueryInput(**deepcopy(inp.model_dump(by_alias=True)))
+            prev_inp.from_date = prev_from
+            prev_inp.to_date = prev_to
+            previous_query_data = _run_query(prev_inp)
+            extras["utilization"] = _utilization_payload_from_query_rows(
+                query_data.get("rows", []),
+                previous_query_data.get("rows", []),
+                {"from": prev_from.isoformat(), "to": prev_to.isoformat()},
+                inp.granularity,
+            )
         except HTTPException as exc:
             extras["utilization"] = {
                 "vehicles_count": 0,
-                "hours_of_utilization_pct": 0.0,
-                "hours_of_utilization_vs_prev_pct": 0.0,
-                "hourly_pct": [{"hour": h, "pct": 0.0} for h in range(24)],
-                "monthly_pct": [],
+                "active_vehicles": 0,
+                "utilization_pct": 0.0,
+                "utilization_vs_prev_pct": 0.0,
+                "bucket_pct": [],
+                "granularity": inp.granularity,
                 "timezone": "database-local",
                 "error": str(exc.detail),
             }
