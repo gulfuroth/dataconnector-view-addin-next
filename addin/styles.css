@@ -296,6 +296,15 @@ section {
 .mini-fill.util-month {
   background: #1d4ed8;
 }
+.trend-wrap {
+  height: 220px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  padding: 6px;
+}
+.trend-svg {
+  display: block;
+}
 .mini-val {
   text-align: right;
   font-weight: 600;

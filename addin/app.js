@@ -9,6 +9,7 @@ const refreshBtn = document.getElementById("refreshBtn");
 const exportBtn = document.getElementById("exportBtn");
 const connectBtn = document.getElementById("connectBtn");
 const rememberPasswordEl = document.getElementById("rememberPassword");
+const autoLoginEl = document.getElementById("autoLogin");
 const statusEl = document.getElementById("statusText");
 const tabMetaEl = document.getElementById("tabMeta");
 const chartEl = document.getElementById("chartPlaceholder");
@@ -59,10 +60,14 @@ const TAB_METRIC = {
   "fuel": "fuel",
 };
 
-function defaultDates() {
+function setDateRangeByGranularity(granularity) {
   const to = new Date();
   const from = new Date();
-  from.setMonth(to.getMonth() - 3);
+  if (granularity === "monthly") {
+    from.setFullYear(to.getFullYear() - 1);
+  } else {
+    from.setMonth(to.getMonth() - 1);
+  }
   fromEl.value = from.toISOString().slice(0, 10);
   toEl.value = to.toISOString().slice(0, 10);
 }
@@ -109,6 +114,7 @@ function saveConfig() {
     ...payload,
     mygPassword: rememberPassword ? payload.mygPassword : "",
     rememberPassword,
+    autoLogin: !!autoLoginEl.checked,
   };
   localStorage.setItem("dcv_config", JSON.stringify(local));
 }
@@ -125,6 +131,7 @@ function loadConfig() {
     mygDatabaseEl.value = cfg.mygDatabase || "";
     mygUserEl.value = cfg.mygUser || "";
     rememberPasswordEl.checked = !!cfg.rememberPassword;
+    autoLoginEl.checked = !!cfg.autoLogin;
     mygPasswordEl.value = cfg.rememberPassword ? (cfg.mygPassword || "") : "";
     dcBaseUrlEl.value = cfg.dcBaseUrl || DEFAULT_DC_BASE_URL;
   } catch (_err) {
@@ -144,6 +151,18 @@ function handleRememberPasswordToggle() {
     } catch (_err) {
       // ignore malformed storage
     }
+  }
+}
+
+function handleAutoLoginToggle() {
+  const raw = localStorage.getItem("dcv_config");
+  if (!raw) return;
+  try {
+    const cfg = JSON.parse(raw);
+    cfg.autoLogin = !!autoLoginEl.checked;
+    localStorage.setItem("dcv_config", JSON.stringify(cfg));
+  } catch (_err) {
+    // ignore malformed storage
   }
 }
 
@@ -712,17 +731,45 @@ function renderUtilizationInsights(rows, tabPayload) {
   const util = tabPayload?.utilization;
   if (util && Array.isArray(util.bucket_pct)) {
     const buckets = Array.isArray(util.bucket_pct) ? util.bucket_pct : [];
-    const maxBucket = Math.max(...buckets.map((x) => Number(x.pct) || 0), 1);
-    const bucketRows = buckets.map((x) => `
-      <div class="mini-row">
-        <div class="mini-label">${escapeHtml(x.bucket)}</div>
-        <div class="mini-track"><div class="mini-fill util-month" style="width:${Math.max(2, ((Number(x.pct) || 0) / maxBucket) * 100)}%"></div></div>
-        <div class="mini-val">${(Number(x.pct) || 0).toFixed(1)}%</div>
-      </div>
-    `).join("");
+    const points = buckets.map((x) => ({ bucket: x.bucket, value: Number(x.pct) || 0 }));
     const delta = Number(util.utilization_vs_prev_pct) || 0;
     const deltaClass = delta >= 0 ? "up" : "down";
     const granLabel = util.granularity === "monthly" ? "mes" : "día";
+
+    const trendSvg = (() => {
+      if (!points.length) return '<div class="insight-sub">Sin datos</div>';
+      const width = 760;
+      const height = 210;
+      const pad = 30;
+      const maxVal = Math.max(...points.map((p) => p.value), 1);
+      const minVal = Math.min(...points.map((p) => p.value), 0);
+      const span = Math.max(maxVal - minVal, 1);
+      const toX = (i) => pad + (i * (width - pad * 2)) / Math.max(points.length - 1, 1);
+      const toY = (v) => height - pad - ((v - minVal) / span) * (height - pad * 2);
+      const poly = points.map((p, i) => `${toX(i).toFixed(2)},${toY(p.value).toFixed(2)}`).join(" ");
+      const step = Math.max(1, Math.floor((points.length - 1) / 6));
+      const ticks = [];
+      for (let i = 0; i < points.length; i += step) ticks.push(i);
+      if (ticks[ticks.length - 1] !== points.length - 1) ticks.push(points.length - 1);
+      const xTicks = ticks.map((i) => `
+        <text x="${toX(i).toFixed(2)}" y="${height - 8}" text-anchor="middle" font-size="10" fill="#64748b">${escapeHtml(formatAxisLabel(points[i].bucket))}</text>
+      `).join("");
+      const dots = points.map((p, i) => `
+        <circle cx="${toX(i).toFixed(2)}" cy="${toY(p.value).toFixed(2)}" r="2.8" fill="#0f766e">
+          <title>${p.bucket}: ${p.value.toFixed(2)}%</title>
+        </circle>
+      `).join("");
+      return `
+        <svg class="trend-svg" viewBox="0 0 ${width} ${height}" width="100%" height="100%" role="img" aria-label="Utilización por periodo">
+          <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" stroke="#94a3b8" stroke-width="1" />
+          <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${height - pad}" stroke="#94a3b8" stroke-width="1" />
+          <polyline fill="none" stroke="#0f766e" stroke-width="2.2" points="${poly}" />
+          ${dots}
+          ${xTicks}
+        </svg>
+      `;
+    })();
+
     tabInsightsGridEl.innerHTML = `
       <article class="insight-card">
         <h3 class="insight-title">Utilización de flota</h3>
@@ -731,7 +778,7 @@ function renderUtilizationInsights(rows, tabPayload) {
       </article>
       <article class="insight-card">
         <h3 class="insight-title">Utilización por ${granLabel}</h3>
-        <div class="mini-bars">${bucketRows || '<div class="insight-sub">Sin datos</div>'}</div>
+        <div class="trend-wrap">${trendSvg}</div>
       </article>
       <article class="insight-card">
         <h3 class="insight-title">Actividad en periodo</h3>
@@ -1059,7 +1106,9 @@ exportBtn.addEventListener("click", () => {
 });
 connectBtn.addEventListener("click", connect);
 rememberPasswordEl.addEventListener("change", handleRememberPasswordToggle);
+autoLoginEl.addEventListener("change", handleAutoLoginToggle);
 chartAggModeEl.addEventListener("change", refreshVisualsFromRows);
+granularityEl.addEventListener("change", () => setDateRangeByGranularity(granularityEl.value));
 for (const btn of tabButtons) {
   btn.addEventListener("click", async () => {
     const tab = btn.dataset.tab;
@@ -1141,6 +1190,10 @@ byFuelTypeChartEl.addEventListener("click", (ev) => {
 });
 
 loadConfig();
-defaultDates();
+setDateRangeByGranularity(granularityEl.value);
 toggleGroup();
 updateTabUI();
+
+if (autoLoginEl.checked && mygServerEl.value && mygDatabaseEl.value && mygUserEl.value && mygPasswordEl.value) {
+  connect();
+}
