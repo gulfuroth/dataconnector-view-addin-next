@@ -13,6 +13,7 @@ const autoLoginEl = document.getElementById("autoLogin");
 const statusEl = document.getElementById("statusText");
 const tabMetaEl = document.getElementById("tabMeta");
 const chartEl = document.getElementById("chartPlaceholder");
+const chartTooltipEl = document.getElementById("chartHoverTooltip");
 const zoomBackBtn = document.getElementById("zoomBackBtn");
 const zoomResetBtn = document.getElementById("zoomResetBtn");
 const zoomRangeFillEl = document.getElementById("zoomRangeFill");
@@ -411,6 +412,37 @@ function buildSeries(rows, mode, selectedKeys) {
   return { fullPoints, selectedPoints };
 }
 
+function meanOfPoints(points) {
+  if (!points.length) return 0;
+  const sum = points.reduce((acc, p) => acc + (Number(p.value) || 0), 0);
+  return sum / points.length;
+}
+
+function attachChartHoverHandlers() {
+  chartEl.onmousemove = (ev) => {
+    const target = ev.target instanceof Element ? ev.target.closest(".chart-point") : null;
+    if (!target || !(target instanceof SVGElement)) {
+      chartTooltipEl.classList.remove("visible");
+      return;
+    }
+    const tip = target.getAttribute("data-tip") || "";
+    if (!tip) {
+      chartTooltipEl.classList.remove("visible");
+      return;
+    }
+    chartTooltipEl.textContent = tip;
+    chartTooltipEl.classList.add("visible");
+    const rect = chartEl.getBoundingClientRect();
+    const x = ev.clientX - rect.left + 12;
+    const y = ev.clientY - rect.top - 26;
+    chartTooltipEl.style.left = `${x}px`;
+    chartTooltipEl.style.top = `${Math.max(8, y)}px`;
+  };
+  chartEl.onmouseleave = () => {
+    chartTooltipEl.classList.remove("visible");
+  };
+}
+
 function renderChart(lines) {
   const allPoints = lines.flatMap((l) => l.points);
   if (!allPoints.length) {
@@ -435,6 +467,17 @@ function renderChart(lines) {
     return pad + (i * (width - pad * 2)) / Math.max(buckets.length - 1, 1);
   };
   const toY = (v) => height - pad - ((v - minVal) / span) * (height - pad * 2);
+  const yTicks = 5;
+  const yTickMarks = [];
+  for (let i = 0; i <= yTicks; i += 1) {
+    const ratio = i / yTicks;
+    const v = minVal + (1 - ratio) * span;
+    const y = toY(v).toFixed(2);
+    yTickMarks.push(`
+      <line x1="${pad}" y1="${y}" x2="${width - pad}" y2="${y}" stroke="#e2e8f0" stroke-width="1" />
+      <text x="${pad - 8}" y="${Number(y) + 3}" text-anchor="end" font-size="10" fill="#64748b">${v.toFixed(1)}</text>
+    `);
+  }
 
   const maxTicks = 7;
   const step = Math.max(1, Math.floor((buckets.length - 1) / Math.max(1, maxTicks - 1)));
@@ -459,8 +502,9 @@ function renderChart(lines) {
     const circles = line.points.map((p) => {
       const x = toX(p.bucket).toFixed(2);
       const y = toY(Number(p.value)).toFixed(2);
+      const tip = `${line.name}: ${Number(p.value).toFixed(2)} (${p.bucket})`;
       return `
-        <circle cx="${x}" cy="${y}" r="3.2" fill="${line.color}">
+        <circle class="chart-point" cx="${x}" cy="${y}" r="3.2" fill="${line.color}" data-tip="${escapeHtml(tip)}">
           <title>${line.name}\n${p.bucket}: ${Number(p.value).toFixed(2)}</title>
         </circle>
       `;
@@ -469,6 +513,16 @@ function renderChart(lines) {
     return `
       <polyline fill="none" stroke="${line.color}" stroke-width="2.5" points="${polyline}" />
       ${circles}
+    `;
+  }).join("");
+
+  const meanLines = lines.map((line) => {
+    if (!line.points.length) return "";
+    const mean = meanOfPoints(line.points);
+    const y = toY(mean).toFixed(2);
+    return `
+      <line x1="${pad}" y1="${y}" x2="${width - pad}" y2="${y}" stroke="${line.color}" stroke-width="1.4" stroke-dasharray="5 4" opacity="0.8" />
+      <text x="${width - pad + 4}" y="${Number(y) + 3}" font-size="10" fill="${line.color}">media ${mean.toFixed(2)}</text>
     `;
   }).join("");
 
@@ -482,9 +536,11 @@ function renderChart(lines) {
   chartEl.innerHTML = `
     <svg viewBox="0 0 ${width} ${height}" width="100%" height="100%" role="img" aria-label="Evolución temporal">
       <rect x="${pad}" y="${pad}" width="${width - pad * 2}" height="${height - pad * 2}" fill="transparent" data-zoom-area="1"></rect>
+      ${yTickMarks.join("")}
       <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" stroke="#94a3b8" stroke-width="1" />
       <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${height - pad}" stroke="#94a3b8" stroke-width="1" />
       ${tickMarks}
+      ${meanLines}
       ${linePaths}
       ${legend}
       <rect id="chartZoomRect" x="0" y="${pad}" width="0" height="${height - pad * 2}" fill="#2563eb22" stroke="#2563eb" stroke-width="1" display="none"></rect>
@@ -492,6 +548,7 @@ function renderChart(lines) {
   `;
   updateZoomControls();
   attachChartZoomHandlers();
+  attachChartHoverHandlers();
 }
 
 function applyDimensionFilters(rows) {
@@ -746,6 +803,17 @@ function renderUtilizationInsights(rows, tabPayload) {
       const span = Math.max(maxVal - minVal, 1);
       const toX = (i) => pad + (i * (width - pad * 2)) / Math.max(points.length - 1, 1);
       const toY = (v) => height - pad - ((v - minVal) / span) * (height - pad * 2);
+      const yTicks = 4;
+      const yTickMarks = [];
+      for (let i = 0; i <= yTicks; i += 1) {
+        const ratio = i / yTicks;
+        const v = minVal + (1 - ratio) * span;
+        const y = toY(v).toFixed(2);
+        yTickMarks.push(`
+          <line x1="${pad}" y1="${y}" x2="${width - pad}" y2="${y}" stroke="#e2e8f0" stroke-width="1" />
+          <text x="${pad - 7}" y="${Number(y) + 3}" text-anchor="end" font-size="10" fill="#64748b">${v.toFixed(1)}</text>
+        `);
+      }
       const poly = points.map((p, i) => `${toX(i).toFixed(2)},${toY(p.value).toFixed(2)}`).join(" ");
       const step = Math.max(1, Math.floor((points.length - 1) / 6));
       const ticks = [];
@@ -761,6 +829,7 @@ function renderUtilizationInsights(rows, tabPayload) {
       `).join("");
       return `
         <svg class="trend-svg" viewBox="0 0 ${width} ${height}" width="100%" height="100%" role="img" aria-label="Utilización por periodo">
+          ${yTickMarks.join("")}
           <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" stroke="#94a3b8" stroke-width="1" />
           <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${height - pad}" stroke="#94a3b8" stroke-width="1" />
           <polyline fill="none" stroke="#0f766e" stroke-width="2.2" points="${poly}" />
@@ -832,6 +901,7 @@ function renderUtilizationInsights(rows, tabPayload) {
 }
 
 function renderFuelInsights(rows) {
+  const mode = chartAggModeEl.value;
   const bucketAcc = new Map();
   const vehicleAcc = new Map();
   const groupFuel = aggregateBy(rows, (r) => r.group_name || "Sin grupo");
@@ -856,6 +926,9 @@ function renderFuelInsights(rows) {
   const consumptionByBucket = Array.from(bucketAcc.entries())
     .sort((a, b) => a[0].localeCompare(b[0]))
     .map(([bucket, acc]) => ({ label: bucket, value: acc.dist > 0 ? (acc.fuel / acc.dist) * 100 : 0 }));
+  const totalFuelByBucket = Array.from(bucketAcc.entries())
+    .sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([bucket, acc]) => ({ label: bucket, value: acc.fuel }));
 
   const topConsumptionVehicles = Array.from(vehicleAcc.entries())
     .map(([label, acc]) => ({ label, value: acc.dist > 0 ? (acc.fuel / acc.dist) * 100 : 0, dist: acc.dist }))
@@ -863,24 +936,39 @@ function renderFuelInsights(rows) {
     .sort((a, b) => b.value - a.value)
     .slice(0, 10)
     .map(({ label, value }) => ({ label, value }));
+  const topFuelVehicles = Array.from(vehicleAcc.entries())
+    .map(([label, acc]) => ({ label, value: acc.fuel }))
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 10);
 
   const totalFuel = rows.reduce((acc, r) => acc + (Number(r.value) || 0), 0);
   const totalDist = rows.reduce((acc, r) => acc + (Number(r.distance_value) || 0), 0);
   const globalRatio = totalDist > 0 ? (totalFuel / totalDist) * 100 : 0;
 
+  const isAverage = mode === "average";
+  const titleMetric = isAverage ? "Consumo medio (ponderado)" : "Consumo total";
+  const metricValue = isAverage ? globalRatio.toFixed(2) : totalFuel.toFixed(2);
+  const metricSub = isAverage ? "litros/100km en el periodo filtrado" : "litros en el periodo filtrado";
+  const trendTitle = isAverage ? "Evolución de consumo (L/100km)" : "Evolución consumo total (L)";
+  const trendData = isAverage ? consumptionByBucket : totalFuelByBucket;
+  const trendFmt = isAverage ? (v) => v.toFixed(2) : (v) => Number(v).toFixed(1);
+  const topTitle = isAverage ? "Top consumo por vehículo (L/100km)" : "Top consumo total por vehículo (L)";
+  const topData = isAverage ? topConsumptionVehicles : topFuelVehicles;
+  const topFmt = isAverage ? (v) => v.toFixed(2) : (v) => Number(v).toFixed(1);
+
   tabInsightsGridEl.innerHTML = `
     <article class="insight-card">
-      <h3 class="insight-title">Consumo medio</h3>
-      <div class="insight-metric">${globalRatio.toFixed(2)}</div>
-      <div class="insight-sub">litros/100km en el periodo filtrado</div>
+      <h3 class="insight-title">${titleMetric}</h3>
+      <div class="insight-metric">${metricValue}</div>
+      <div class="insight-sub">${metricSub}</div>
     </article>
     <article class="insight-card">
-      <h3 class="insight-title">Evolución de consumo (L/100km)</h3>
-      ${renderMiniBars(consumptionByBucket.slice(-10), (v) => v.toFixed(2))}
+      <h3 class="insight-title">${trendTitle}</h3>
+      ${renderMiniBars(trendData.slice(-10), trendFmt)}
     </article>
     <article class="insight-card">
-      <h3 class="insight-title">Top consumo por vehículo (L/100km)</h3>
-      ${renderMiniBars(topConsumptionVehicles, (v) => v.toFixed(2))}
+      <h3 class="insight-title">${topTitle}</h3>
+      ${renderMiniBars(topData, topFmt)}
     </article>
     <article class="insight-card">
       <h3 class="insight-title">Combustible total por grupo</h3>
