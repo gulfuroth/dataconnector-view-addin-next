@@ -58,6 +58,28 @@ Guía detallada: `docs/register-addin.md`
 
 Este diseño evita el bloqueo CORS en llamadas directas de navegador a Data Connector.
 
+## QA Checklist
+
+Valida estos escenarios antes de cerrar release:
+
+- Scope: `fleet` y `group`.
+- Granularidad: `daily` y `monthly`.
+- Tabs: `Main Data`, `Utilization`, `Fuel`.
+- Drilldown: selección de vehículos, grupo, fuel type, zoom temporal.
+- Gráfico principal:
+  - ticks eje Y visibles
+  - hover en puntos mostrando valor
+  - líneas de media para flota y seleccionados
+- Fuel:
+  - modo `total` y modo `promedio`
+  - en promedio, cálculo ponderado (`sum(fuel)/sum(distance)*100`)
+- Utilization:
+  - % periodo actual
+  - delta vs periodo anterior equivalente
+  - serie por bucket diaria/mensual
+- Export CSV con filtros activos.
+- Cache backend (`/api/cache/stats`) con hits al repetir misma consulta.
+
 ## Direct Browser Test (No Backend)
 
 Para validar si tu tenant permite llamadas directas sin proxy:

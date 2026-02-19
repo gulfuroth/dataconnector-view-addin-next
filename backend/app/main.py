@@ -596,6 +596,16 @@ def _run_query(inp: QueryInput) -> Dict:
     return {"rows": rows, "points": points}
 
 
+def _run_query_cached(inp: QueryInput, prefix: str = "query") -> Dict:
+    key = _cache_key(prefix, inp.model_dump(by_alias=True))
+    cached = _cache_get(key)
+    if cached is not None:
+        return deepcopy(cached)
+    data = _run_query(inp)
+    _cache_set(key, deepcopy(data))
+    return data
+
+
 def _resolve_allowed_serials(inp: QueryInput, credentials: Dict, auth_header: str) -> List[str]:
     allowed_serials: List[str] = []
     if inp.scope != "group":
@@ -659,7 +669,7 @@ def _utilization_payload_from_query_rows(
 
 @app.post("/api/query")
 def query(inp: QueryInput):
-    return _run_query(inp)
+    return _run_query_cached(inp, prefix="query-api")
 
 
 def _build_tab_payload(tab: str, metric: str, query_data: Dict, cache_hit: bool) -> Dict:
@@ -713,13 +723,13 @@ def query_tab(tab_name: str, inp: QueryInput):
         cached_resp["cache"]["hit"] = True
         return cached_resp
 
-    query_data = _run_query(inp)
+    query_data = _run_query_cached(inp, prefix=f"query-tab:{tab_name}")
     extras: Dict = {}
     # Fuel view needs distance context to compute consumption (L/100km) in the UI.
     if tab_name == "fuel":
         distance_inp = QueryInput(**deepcopy(inp.model_dump(by_alias=True)))
         distance_inp.metric = "distance"
-        distance_data = _run_query(distance_inp)
+        distance_data = _run_query_cached(distance_inp, prefix="query-tab:fuel-distance")
         distance_map: Dict[str, float] = {}
         for r in distance_data.get("rows", []):
             key = f"{r.get('bucket')}|||{r.get('device_serial')}"
@@ -735,7 +745,7 @@ def query_tab(tab_name: str, inp: QueryInput):
             prev_inp = QueryInput(**deepcopy(inp.model_dump(by_alias=True)))
             prev_inp.from_date = prev_from
             prev_inp.to_date = prev_to
-            previous_query_data = _run_query(prev_inp)
+            previous_query_data = _run_query_cached(prev_inp, prefix="query-tab:util-prev")
             extras["utilization"] = _utilization_payload_from_query_rows(
                 query_data.get("rows", []),
                 previous_query_data.get("rows", []),

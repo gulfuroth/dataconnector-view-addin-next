@@ -815,6 +815,8 @@ function renderUtilizationInsights(rows, tabPayload) {
         `);
       }
       const poly = points.map((p, i) => `${toX(i).toFixed(2)},${toY(p.value).toFixed(2)}`).join(" ");
+      const mean = points.reduce((acc, p) => acc + p.value, 0) / Math.max(points.length, 1);
+      const meanY = toY(mean).toFixed(2);
       const step = Math.max(1, Math.floor((points.length - 1) / 6));
       const ticks = [];
       for (let i = 0; i < points.length; i += step) ticks.push(i);
@@ -832,6 +834,8 @@ function renderUtilizationInsights(rows, tabPayload) {
           ${yTickMarks.join("")}
           <line x1="${pad}" y1="${height - pad}" x2="${width - pad}" y2="${height - pad}" stroke="#94a3b8" stroke-width="1" />
           <line x1="${pad}" y1="${pad}" x2="${pad}" y2="${height - pad}" stroke="#94a3b8" stroke-width="1" />
+          <line x1="${pad}" y1="${meanY}" x2="${width - pad}" y2="${meanY}" stroke="#0f766e" stroke-width="1.3" stroke-dasharray="5 4" opacity="0.85" />
+          <text x="${width - pad + 4}" y="${Number(meanY) + 3}" font-size="10" fill="#0f766e">media ${mean.toFixed(2)}</text>
           <polyline fill="none" stroke="#0f766e" stroke-width="2.2" points="${poly}" />
           ${dots}
           ${xTicks}
